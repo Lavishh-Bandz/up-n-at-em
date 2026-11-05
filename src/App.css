@@ -1,0 +1,304 @@
+/* App.css
+   Component styles for UP N AT EM. Minimal but polished. */
+
+.app {
+  max-width: 820px;
+  margin: 0 auto;
+  padding: 1.5rem 1.25rem 3rem;
+}
+
+/* ---- Titles ------------------------------------------------------------- */
+.app-title {
+  font-size: 2.5rem;
+  letter-spacing: 0.08em;
+  margin: 0.5rem 0 0.25rem;
+  text-align: center;
+  color: var(--accent);
+}
+
+.tagline {
+  text-align: center;
+  color: var(--muted);
+  margin-top: 0;
+}
+
+/* ---- Settings panel ----------------------------------------------------- */
+.settings-panel h2 {
+  margin-top: 1.5rem;
+}
+
+.step-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.step-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.75rem;
+  background: var(--panel);
+  padding: 0.9rem 1rem;
+  border-radius: 12px;
+}
+
+.step-number {
+  font-weight: 700;
+  color: var(--accent-2);
+  align-self: center;
+}
+
+.step-row label {
+  display: flex;
+  flex-direction: column;
+  font-size: 0.8rem;
+  color: var(--muted);
+  gap: 0.25rem;
+}
+
+.step-row select,
+.step-row input {
+  background: #0b1220;
+  color: var(--text);
+  border: 1px solid #334155;
+  border-radius: 8px;
+  padding: 0.45rem 0.55rem;
+  font-size: 1rem;
+}
+
+.step-row input[type='number'] {
+  width: 5rem;
+}
+
+.step-controls {
+  display: flex;
+  gap: 0.35rem;
+  margin-left: auto;
+}
+
+.step-controls button {
+  background: #334155;
+  color: var(--text);
+  border: none;
+  border-radius: 8px;
+  width: 2rem;
+  height: 2rem;
+  cursor: pointer;
+  font-size: 1rem;
+}
+
+.step-controls button:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.add-step {
+  margin-top: 0.9rem;
+  background: transparent;
+  color: var(--accent);
+  border: 1px dashed #334155;
+  border-radius: 10px;
+  padding: 0.6rem 1rem;
+  cursor: pointer;
+  font-size: 0.95rem;
+}
+
+.chain-summary {
+  margin-top: 1.25rem;
+  font-size: 1.05rem;
+}
+
+.validation-error {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+.start-button {
+  margin-top: 1.25rem;
+  width: 100%;
+  background: var(--accent);
+  color: #06283d;
+  border: none;
+  border-radius: 12px;
+  padding: 0.9rem 1rem;
+  font-size: 1.15rem;
+  font-weight: 800;
+  letter-spacing: 0.03em;
+  cursor: pointer;
+}
+
+.start-button:hover {
+  filter: brightness(1.08);
+}
+
+.emergency-note {
+  margin-top: 1.25rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+  line-height: 1.5;
+}
+
+/* ---- Camera view + skeleton overlay ------------------------------------- */
+.workout-session {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.camera-view {
+  position: relative;
+  width: 100%;
+  background: #000;
+  border-radius: 14px;
+  overflow: hidden;
+  aspect-ratio: 4 / 3;
+}
+
+.camera-video,
+.camera-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.camera-overlay {
+  /* Canvas sits on top of the video; pointer events pass through. */
+  pointer-events: none;
+}
+
+.camera-status {
+  position: absolute;
+  left: 0.75rem;
+  bottom: 0.75rem;
+  margin: 0;
+  padding: 0.3rem 0.6rem;
+  background: rgba(0, 0, 0, 0.6);
+  border-radius: 8px;
+  font-size: 0.85rem;
+}
+
+.camera-status-error {
+  color: var(--danger);
+}
+
+.camera-error {
+  background: var(--panel);
+  border: 1px solid var(--danger);
+  border-radius: 14px;
+  padding: 1.5rem;
+  text-align: center;
+  color: var(--danger);
+  font-weight: 600;
+}
+
+/* ---- Progress HUD ------------------------------------------------------- */
+.progress-hud {
+  background: var(--panel);
+  border-radius: 14px;
+  padding: 1rem 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  text-align: center;
+}
+
+.hud-step {
+  color: var(--muted);
+  font-size: 0.9rem;
+  letter-spacing: 0.05em;
+}
+
+.hud-exercise {
+  font-size: 1.4rem;
+  font-weight: 700;
+  color: var(--accent);
+}
+
+.hud-reps {
+  font-size: 2.75rem;
+  font-weight: 800;
+}
+
+.hud-reps-count {
+  color: var(--accent-2);
+}
+
+.hud-reps-target {
+  color: var(--muted);
+}
+
+.hud-warning {
+  color: var(--danger);
+  font-size: 0.9rem;
+  line-height: 1.4;
+}
+
+.hud-alarm {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+/* ---- Emergency exit ----------------------------------------------------- */
+.emergency-exit {
+  text-align: center;
+}
+
+.emergency-button {
+  position: relative;
+  overflow: hidden;
+  width: 100%;
+  background: #3a0d12;
+  color: var(--danger);
+  border: 1px solid var(--danger);
+  border-radius: 12px;
+  padding: 0.8rem 1rem;
+  font-size: 1rem;
+  font-weight: 700;
+  cursor: pointer;
+  user-select: none;
+}
+
+.emergency-fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  background: rgba(248, 113, 113, 0.35);
+  width: 0;
+  pointer-events: none;
+  transition: width 0.05s linear;
+}
+
+.emergency-caption {
+  color: var(--muted);
+  font-size: 0.8rem;
+  margin: 0.5rem 0 0;
+  line-height: 1.4;
+}
+
+/* ---- Success screen ----------------------------------------------------- */
+.success-screen {
+  text-align: center;
+  padding-top: 3rem;
+}
+
+.success-screen h1 {
+  color: var(--accent);
+}
+
+.success-sub {
+  color: var(--muted);
+  max-width: 28rem;
+  margin: 0.75rem auto 0;
+  line-height: 1.5;
+}
+
+.success-screen .start-button {
+  max-width: 20rem;
+}

@@ -1,0 +1,192 @@
+// CameraView.jsx
+// -----------------------------------------------------------------------------
+// Shows the live webcam feed and draws a "skeleton" over the person: dots on
+// each detected joint and lines connecting joints that are next to each other
+// (shoulder-to-elbow, elbow-to-wrist, and so on).
+//
+// HOW IT FITS TOGETHER:
+//   - A <video> element plays the camera stream.
+//   - A <canvas> sits exactly on top of the video (same size, same position).
+//   - usePoseDetector watches the video and gives us keypoints every frame.
+//   - Each frame we clear the canvas and redraw the skeleton from those points.
+//
+// The parent (WorkoutSession) owns the rep-counting logic. We just forward the
+// keypoints up via onPose so the parent can feed them into the rep counter.
+
+import { useEffect, useRef, useState } from 'react';
+import * as poseDetection from '@tensorflow-models/pose-detection';
+import { usePoseDetector } from '../hooks/usePoseDetector.js';
+
+// Only draw joints/lines the detector is reasonably sure about. This matches
+// the anti-cheat idea: faint guesses are not drawn.
+const DRAW_THRESHOLD = 0.3;
+
+// The pairs of joints that should be joined by a line to look like a skeleton.
+// We ask pose-detection for MoveNet's official adjacency list; if that ever
+// fails we fall back to a hand-written list so the overlay still works.
+function getSkeletonPairs() {
+  try {
+    // Returns pairs of keypoint INDEXES, e.g. [5, 7] = left_shoulder-left_elbow.
+    return poseDetection.util.getAdjacentPairs(
+      poseDetection.SupportedModels.MoveNet
+    );
+  } catch {
+    // MoveNet keypoint index order (COCO): 0 nose, 1/2 eyes, 3/4 ears,
+    // 5/6 shoulders, 7/8 elbows, 9/10 wrists, 11/12 hips, 13/14 knees,
+    // 15/16 ankles.
+    return [
+      [5, 7], [7, 9], [6, 8], [8, 10],   // arms
+      [5, 6], [5, 11], [6, 12], [11, 12], // torso
+      [11, 13], [13, 15], [12, 14], [14, 16], // legs
+    ];
+  }
+}
+
+// MoveNet always returns its 17 keypoints in this fixed order, so we can map an
+// index from the adjacency list back to a joint name to look it up in the map.
+const MOVENET_KEYPOINT_NAMES = [
+  'nose', 'left_eye', 'right_eye', 'left_ear', 'right_ear',
+  'left_shoulder', 'right_shoulder', 'left_elbow', 'right_elbow',
+  'left_wrist', 'right_wrist', 'left_hip', 'right_hip',
+  'left_knee', 'right_knee', 'left_ankle', 'right_ankle',
+];
+
+/**
+ * @param {object} props
+ * @param {boolean} props.active        Whether a session is running (drives detection).
+ * @param {(keypointsMap:object) => void} [props.onPose]  Called each frame with keypoints-by-name.
+ */
+export default function CameraView({ active, onPose }) {
+  const videoRef = useRef(null);
+  const canvasRef = useRef(null);
+  const streamRef = useRef(null);
+
+  // Camera permission / hardware errors we want to show the user clearly.
+  const [cameraError, setCameraError] = useState(null);
+
+  // Run pose detection against the video while the session is active.
+  const { status, error: detectorError, keypoints } = usePoseDetector(videoRef, {
+    enabled: active,
+    onPose,
+  });
+
+  // ---- 1. Acquire the webcam and attach it to the <video> ------------------
+  useEffect(() => {
+    let cancelled = false;
+
+    async function startCamera() {
+      // Guard for environments without a camera API (e.g. headless/SSR).
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        setCameraError('This browser does not support camera access.');
+        return;
+      }
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+        if (cancelled) {
+          // We unmounted while waiting for permission; stop the stream.
+          stream.getTracks().forEach((t) => t.stop());
+          return;
+        }
+        streamRef.current = stream;
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          await videoRef.current.play().catch(() => {});
+        }
+      } catch (err) {
+        // Translate the browser's error into a friendly message.
+        let message = 'Could not access the camera.';
+        if (err && (err.name === 'NotAllowedError' || err.name === 'SecurityError')) {
+          message =
+            'Camera permission was denied. Please allow camera access and reload to use UP N AT EM.';
+        } else if (err && err.name === 'NotFoundError') {
+          message = 'No camera was found on this device.';
+        }
+        if (!cancelled) setCameraError(message);
+      }
+    }
+
+    startCamera();
+
+    // CLEANUP: stop every track so the camera light turns off on unmount.
+    return () => {
+      cancelled = true;
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach((t) => t.stop());
+        streamRef.current = null;
+      }
+    };
+  }, []);
+
+  // ---- 2. Draw the skeleton overlay whenever keypoints change --------------
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    const video = videoRef.current;
+    if (!canvas || !video) return;
+
+    // Match the canvas pixel size to the actual video frame size so the drawn
+    // joints line up exactly with the image underneath.
+    const width = video.videoWidth || canvas.width;
+    const height = video.videoHeight || canvas.height;
+    if (width && height && (canvas.width !== width || canvas.height !== height)) {
+      canvas.width = width;
+      canvas.height = height;
+    }
+
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    // Draw the connecting lines (bones).
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = '#38bdf8';
+    for (const [i, j] of getSkeletonPairs()) {
+      const a = keypoints[MOVENET_KEYPOINT_NAMES[i]];
+      const b = keypoints[MOVENET_KEYPOINT_NAMES[j]];
+      if (a && b && a.score >= DRAW_THRESHOLD && b.score >= DRAW_THRESHOLD) {
+        ctx.beginPath();
+        ctx.moveTo(a.x, a.y);
+        ctx.lineTo(b.x, b.y);
+        ctx.stroke();
+      }
+    }
+
+    // Draw the joints (dots) on top of the lines.
+    ctx.fillStyle = '#f472b6';
+    for (const name of MOVENET_KEYPOINT_NAMES) {
+      const kp = keypoints[name];
+      if (kp && kp.score >= DRAW_THRESHOLD) {
+        ctx.beginPath();
+        ctx.arc(kp.x, kp.y, 5, 0, 2 * Math.PI);
+        ctx.fill();
+      }
+    }
+  }, [keypoints]);
+
+  // ---- 3. Render -----------------------------------------------------------
+  if (cameraError) {
+    return (
+      <div className="camera-error" role="alert">
+        <p>📷 {cameraError}</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="camera-view">
+      {/* The video and canvas are stacked; CSS positions the canvas on top. */}
+      <video ref={videoRef} className="camera-video" playsInline muted />
+      <canvas ref={canvasRef} className="camera-overlay" />
+
+      {/* Small status line so the user knows the model is warming up. */}
+      {status === 'loading' && (
+        <p className="camera-status">Loading pose detector…</p>
+      )}
+      {status === 'error' && (
+        <p className="camera-status camera-status-error">
+          Pose detector failed to load
+          {detectorError ? `: ${detectorError.message}` : '.'}
+        </p>
+      )}
+    </div>
+  );
+}
