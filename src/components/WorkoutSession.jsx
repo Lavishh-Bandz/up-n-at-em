@@ -24,6 +24,7 @@ import { createWorkoutQueue } from '../logic/workoutQueue.js';
 import { createRepCounter } from '../logic/repCounter.js';
 import { getPreset, pickBetterSide, evaluateOrientation } from '../logic/exercises.js';
 import { angleBetween, allConfident, createAngleSmoother } from '../logic/angles.js';
+import { createPositionGate } from '../logic/positionGate.js';
 
 // How many recent angle readings we average together to calm down detector
 // jitter before the rep counter sees them. A small window keeps fast reps
@@ -32,6 +33,11 @@ const SMOOTHING_WINDOW = 5;
 
 // Minimum keypoint score we trust for counting a rep (anti-cheat gate).
 const MIN_CONFIDENCE = 0.3;
+
+// How long (ms) the user must HOLD the correct position before a step "arms"
+// and we start counting. ~1 second is long enough to reject a brief flicker or
+// just passing through the position, but short enough to feel responsive.
+const ARMING_HOLD_MS = 1000;
 
 /**
  * Build a rep counter configured for a specific workout step.
@@ -74,17 +80,28 @@ export default function WorkoutSession({
   if (smootherRef.current === null) {
     smootherRef.current = createAngleSmoother({ windowSize: SMOOTHING_WINDOW });
   }
+  // The "get into position first" gate for the CURRENT step. While it is not
+  // armed we do not count reps; the user must hold the correct position for
+  // ARMING_HOLD_MS before counting begins. Reset at the start of each step.
+  const positionGateRef = useRef(null);
+  if (positionGateRef.current === null) {
+    positionGateRef.current = createPositionGate({ holdMs: ARMING_HOLD_MS });
+  }
 
   // React state mirrors just what the HUD needs to render.
   const [stepIndex, setStepIndex] = useState(0);
   const [reps, setReps] = useState(0);
   const [confident, setConfident] = useState(false);
+  // Is the current step armed (position confirmed, now counting)? Starts false
+  // so the HUD shows the "get into position" prompt first.
+  const [armed, setArmed] = useState(false);
 
   // The pose handler runs every animation frame. To avoid re-rendering the HUD
   // at frame rate, we remember the last value we pushed into each piece of
   // state and only call the setter when the value actually changed.
   const lastRepsRef = useRef(0);
   const lastConfidentRef = useRef(false);
+  const lastArmedRef = useRef(false);
 
   // Small helpers: only update state when the value is different from last time.
   function updateConfident(value) {
@@ -97,6 +114,12 @@ export default function WorkoutSession({
     if (lastRepsRef.current !== value) {
       lastRepsRef.current = value;
       setReps(value);
+    }
+  }
+  function updateArmed(value) {
+    if (lastArmedRef.current !== value) {
+      lastArmedRef.current = value;
+      setArmed(value);
     }
   }
 
@@ -143,6 +166,30 @@ export default function WorkoutSession({
     // is in the right position.
     const isConfident = jointsConfident && orientationOk;
     updateConfident(isConfident);
+
+    // 3b. ARMING GATE ("get into position first"). Before we count ANY reps for
+    //     this step, the user must hold the exercise's expected position for a
+    //     short moment (ARMING_HOLD_MS). We feed the gate whether the body is in
+    //     position right now (joints visible AND orientation OK) along with a
+    //     frame timestamp, so a brief flicker through the position does not arm.
+    //     While not armed, the HUD shows "Get into position…" and we skip rep
+    //     counting entirely.
+    //
+    //     Mid-set note: once armed we stay armed for the rest of the step, even
+    //     if the user briefly leaves position. The per-rep orientation gate above
+    //     already rejects bad reps, so there is no need to disarm. We only ever
+    //     re-arm from scratch when a NEW step begins (see step advance below).
+    const nowMs =
+      typeof performance !== 'undefined' && performance.now
+        ? performance.now()
+        : Date.now();
+    const { armed: isArmed } = positionGateRef.current.update(isConfident, nowMs);
+    updateArmed(isArmed);
+    if (!isArmed) {
+      // Not armed yet: do not count reps. Keep showing the prompt and wait for
+      // the user to hold the position long enough.
+      return;
+    }
 
     // 4. Compute the tracked joint angle (e.g. the elbow for a push-up) on the
     //    chosen side.
@@ -191,6 +238,11 @@ export default function WorkoutSession({
       if (queue.advance()) {
         counterRef.current = makeCounterForStep(queue.current());
         smootherRef.current.reset(); // fresh smoothing for the new exercise
+        // Re-arm from scratch: the next exercise needs a different start
+        // position (e.g. push-up plank vs. lying down for sit-ups), so the user
+        // must get into position again before counting resumes.
+        positionGateRef.current.reset();
+        updateArmed(false);
         setStepIndex(queue.currentIndex());
         updateReps(0);
       }
@@ -214,6 +266,7 @@ export default function WorkoutSession({
         stepIndex={stepIndex}
         stepCount={steps.length}
         confident={confident}
+        armed={armed}
         alarmPlaying={alarm.playing}
       />
 

@@ -12,6 +12,14 @@
 
 import { EXERCISES } from '../logic/exercises.js';
 
+// Friendly SINGULAR names for the "Get into ___ position…" prompt. The regular
+// `label` ("Push-ups") reads oddly in that sentence, so we keep a small map of
+// nicer singular forms here.
+const POSITION_LABELS = {
+  pushup: 'push-up',
+  situp: 'sit-up',
+};
+
 export default function ProgressHud({
   exerciseId,     // 'pushup' | 'situp'
   reps,           // reps completed on the current step
@@ -19,9 +27,11 @@ export default function ProgressHud({
   stepIndex,      // zero-based index of the current step
   stepCount,      // total number of steps
   confident,      // is the current pose reading trustworthy?
+  armed,          // has the current step confirmed your position (counting on)?
   alarmPlaying,   // is the alarm sounding right now?
 }) {
   const label = EXERCISES[exerciseId]?.label ?? exerciseId;
+  const positionLabel = POSITION_LABELS[exerciseId] ?? label;
 
   return (
     <div className="progress-hud">
@@ -30,6 +40,20 @@ export default function ProgressHud({
       </div>
 
       <div className="hud-row hud-exercise">{label}</div>
+
+      {/* ARMING: before counting starts we ask the user to get into position and
+          hold it for a moment. Once the position is confirmed we flip to a clear
+          "Ready — GO!" and show the live rep count. The alarm keeps blaring the
+          whole time either way. */}
+      {!armed ? (
+        <div className="hud-row hud-arming" role="status">
+          Get into {positionLabel} position…
+        </div>
+      ) : (
+        <div className="hud-row hud-armed" role="status">
+          ✓ Ready — GO!
+        </div>
+      )}
 
       <div className="hud-row hud-reps">
         <span className="hud-reps-count">{reps}</span>
