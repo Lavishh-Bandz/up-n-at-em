@@ -22,8 +22,13 @@ import ProgressHud from './ProgressHud.jsx';
 import EmergencyExit from './EmergencyExit.jsx';
 import { createWorkoutQueue } from '../logic/workoutQueue.js';
 import { createRepCounter } from '../logic/repCounter.js';
-import { getPreset, pickBetterSide } from '../logic/exercises.js';
-import { angleBetween, allConfident } from '../logic/angles.js';
+import { getPreset, pickBetterSide, evaluateOrientation } from '../logic/exercises.js';
+import { angleBetween, allConfident, createAngleSmoother } from '../logic/angles.js';
+
+// How many recent angle readings we average together to calm down detector
+// jitter before the rep counter sees them. A small window keeps fast reps
+// responsive while still smoothing single-frame wobbles.
+const SMOOTHING_WINDOW = 5;
 
 // Minimum keypoint score we trust for counting a rep (anti-cheat gate).
 const MIN_CONFIDENCE = 0.3;
@@ -62,6 +67,12 @@ export default function WorkoutSession({
   const counterRef = useRef(null);
   if (counterRef.current === null) {
     counterRef.current = makeCounterForStep(steps[0]);
+  }
+  // Smooths the tracked angle over the last few frames so detector jitter does
+  // not flicker the counter. Reset whenever we move to a new step.
+  const smootherRef = useRef(null);
+  if (smootherRef.current === null) {
+    smootherRef.current = createAngleSmoother({ windowSize: SMOOTHING_WINDOW });
   }
 
   // React state mirrors just what the HUD needs to render.
@@ -112,15 +123,28 @@ export default function WorkoutSession({
 
     // 1. Pick whichever side of the body (left or right) the camera can see
     //    best right now, so a user facing either way still counts reps.
-    const { angleJoints, requiredKeypoints } = pickBetterSide(step.exercise, keypoints);
+    const { side, angleJoints, requiredKeypoints } = pickBetterSide(
+      step.exercise,
+      keypoints
+    );
 
     // 2. Gather the keypoints that side needs and check their confidence.
     const needed = requiredKeypoints.map((name) => keypoints[name]);
-    const isConfident =
+    const jointsConfident =
       needed.every(Boolean) && allConfident(needed, MIN_CONFIDENCE);
+
+    // 3. Body-orientation gate (anti-cheat, part 2). For push-ups this requires
+    //    your torso to be roughly horizontal, so standing up and just bending
+    //    your elbows does NOT count. Exercises that do not care about
+    //    orientation ('any') always pass this check.
+    const orientationOk = evaluateOrientation(step.exercise, keypoints, side);
+
+    // You only truly count when BOTH the joints are clearly visible AND the body
+    // is in the right position.
+    const isConfident = jointsConfident && orientationOk;
     updateConfident(isConfident);
 
-    // 3. Compute the tracked joint angle (e.g. the elbow for a push-up) on the
+    // 4. Compute the tracked joint angle (e.g. the elbow for a push-up) on the
     //    chosen side.
     let angle = null;
     const [aName, vName, cName] = angleJoints;
@@ -131,7 +155,7 @@ export default function WorkoutSession({
       angle = angleBetween(a, v, c);
     }
 
-    // 4. If we could not compute an angle, there is nothing reliable to feed the
+    // 5. If we could not compute an angle, there is nothing reliable to feed the
     //    rep counter, so treat the frame as not-confident and skip the rep
     //    update entirely. (A null-guarded early return is clearer and safer than
     //    passing a fake fallback angle: it can never nudge the counter, even if a
@@ -141,9 +165,16 @@ export default function WorkoutSession({
       return;
     }
 
-    // 5. Feed the reading into the rep counter. The counter still ignores the
-    //    reading if it is not confident (anti-cheat).
-    counter.update(angle, isConfident);
+    // 6. Smooth the angle over the last few frames before the counter sees it.
+    //    This calms down detector jitter so the counting is steadier and a
+    //    single bad frame cannot spike a fake threshold crossing. Smoothing is
+    //    layered ON TOP of the hysteresis band and anti-cheat gate, not instead
+    //    of them.
+    const smoothedAngle = smootherRef.current.push(angle);
+
+    // 7. Feed the smoothed reading into the rep counter. The counter still
+    //    ignores the reading if it is not confident (anti-cheat + orientation).
+    counter.update(smoothedAngle, isConfident);
 
     // 6. Sync the queue's tally with the counter and update the HUD.
     const stepReps = queue.setReps(counter.reps);
@@ -159,6 +190,7 @@ export default function WorkoutSession({
       }
       if (queue.advance()) {
         counterRef.current = makeCounterForStep(queue.current());
+        smootherRef.current.reset(); // fresh smoothing for the new exercise
         setStepIndex(queue.currentIndex());
         updateReps(0);
       }
