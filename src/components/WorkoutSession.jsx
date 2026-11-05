@@ -34,10 +34,11 @@ const SMOOTHING_WINDOW = 5;
 // Minimum keypoint score we trust for counting a rep (anti-cheat gate).
 const MIN_CONFIDENCE = 0.3;
 
-// How long (ms) the user must HOLD the correct position before a step "arms"
-// and we start counting. ~1 second is long enough to reject a brief flicker or
-// just passing through the position, but short enough to feel responsive.
-const ARMING_HOLD_MS = 1000;
+// How long (ms) of IN-POSITION time the user must rack up before a step "arms"
+// and we start counting. This drives the 5-second get-into-position countdown:
+// the time only ticks down while you are actually in position (it pauses when
+// you are not), so a brief flicker barely moves it.
+const ARMING_HOLD_MS = 5000;
 
 /**
  * Build a rep counter configured for a specific workout step.
@@ -95,6 +96,14 @@ export default function WorkoutSession({
   // Is the current step armed (position confirmed, now counting)? Starts false
   // so the HUD shows the "get into position" prompt first.
   const [armed, setArmed] = useState(false);
+  // Whole seconds left on the get-into-position countdown (5 -> 1). The HUD
+  // shows this as a big number while the step is still arming.
+  const [countdownSeconds, setCountdownSeconds] = useState(
+    Math.ceil(ARMING_HOLD_MS / 1000)
+  );
+  // Is the countdown PAUSED mid-way (some time banked, but currently out of
+  // position)? The HUD uses this to show a "get back into position" hint.
+  const [countdownPaused, setCountdownPaused] = useState(false);
 
   // The pose handler runs every animation frame. To avoid re-rendering the HUD
   // at frame rate, we remember the last value we pushed into each piece of
@@ -102,6 +111,8 @@ export default function WorkoutSession({
   const lastRepsRef = useRef(0);
   const lastConfidentRef = useRef(false);
   const lastArmedRef = useRef(false);
+  const lastCountdownRef = useRef(Math.ceil(ARMING_HOLD_MS / 1000));
+  const lastPausedRef = useRef(false);
 
   // Small helpers: only update state when the value is different from last time.
   function updateConfident(value) {
@@ -120,6 +131,20 @@ export default function WorkoutSession({
     if (lastArmedRef.current !== value) {
       lastArmedRef.current = value;
       setArmed(value);
+    }
+  }
+  // Only re-render when the WHOLE second changes, so micro-jitter in the
+  // millisecond countdown never flickers the on-screen number.
+  function updateCountdownSeconds(value) {
+    if (lastCountdownRef.current !== value) {
+      lastCountdownRef.current = value;
+      setCountdownSeconds(value);
+    }
+  }
+  function updatePaused(value) {
+    if (lastPausedRef.current !== value) {
+      lastPausedRef.current = value;
+      setCountdownPaused(value);
     }
   }
 
@@ -183,11 +208,17 @@ export default function WorkoutSession({
       typeof performance !== 'undefined' && performance.now
         ? performance.now()
         : Date.now();
-    const { armed: isArmed } = positionGateRef.current.update(isConfident, nowMs);
+    const { armed: isArmed, heldMs, remainingSeconds } =
+      positionGateRef.current.update(isConfident, nowMs);
     updateArmed(isArmed);
     if (!isArmed) {
-      // Not armed yet: do not count reps. Keep showing the prompt and wait for
-      // the user to hold the position long enough.
+      // Not armed yet: do not count reps. Drive the get-into-position countdown
+      // instead. Feed the HUD the whole-seconds number (guarded so it only
+      // re-renders when the integer second changes) and a "paused" flag for
+      // when the countdown has started (some time banked) but the user is
+      // currently OUT of position, so the HUD can tell them to get back.
+      updateCountdownSeconds(remainingSeconds);
+      updatePaused(heldMs > 0 && !isConfident);
       return;
     }
 
@@ -243,6 +274,9 @@ export default function WorkoutSession({
         // must get into position again before counting resumes.
         positionGateRef.current.reset();
         updateArmed(false);
+        // Fresh countdown for the new step: back to the full 5 and not paused.
+        updateCountdownSeconds(Math.ceil(ARMING_HOLD_MS / 1000));
+        updatePaused(false);
         setStepIndex(queue.currentIndex());
         updateReps(0);
       }
@@ -267,6 +301,8 @@ export default function WorkoutSession({
         stepCount={steps.length}
         confident={confident}
         armed={armed}
+        countdownSeconds={countdownSeconds}
+        countdownPaused={countdownPaused}
         alarmPlaying={alarm.playing}
       />
 
