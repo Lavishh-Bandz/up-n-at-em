@@ -9,6 +9,17 @@
 //   - what the "down" and "up" angle thresholds are at each difficulty
 //   - a sensible default number of reps per difficulty
 //
+// BODY ORIENTATION (anti-cheat, part 2):
+//   Counting a rep from a joint angle alone is not enough. Standing up and just
+//   bending your elbows makes the elbow angle go down then up exactly like a
+//   real push-up, so it used to count. To stop that, each exercise also says
+//   what body ORIENTATION it expects:
+//     'horizontal' = your torso should be roughly level with the floor (you are
+//                    actually down in a push-up / plank position, not standing).
+//     'any'        = we do not gate on orientation for this exercise.
+//   The check compares the tilt of your shoulder->hip line using the pure
+//   isBodyHorizontal helper from angles.js (see evaluateOrientation below).
+//
 // JOINT NAMES come from MoveNet, the pose-detection model we use. MoveNet names
 // its 17 keypoints like: 'left_shoulder', 'left_elbow', 'left_wrist',
 // 'left_hip', 'left_knee', etc. (and the matching 'right_*' names for the other
@@ -22,6 +33,8 @@
 //   users would count zero reps with no explanation. So every exercise lists a
 //   left joint triple AND a right joint triple, and each frame we pick whichever
 //   side the camera can see more confidently (see pickBetterSide below).
+
+import { isBodyHorizontal } from './angles.js';
 
 /**
  * PUSH-UP
@@ -43,6 +56,10 @@ export const EXERCISES = {
   pushup: {
     id: 'pushup',
     label: 'Push-ups',
+    // A push-up only counts when your body is roughly horizontal (you are down
+    // in push-up/plank position). This is what stops "standing and bending your
+    // arms" from being counted as reps.
+    orientation: 'horizontal',
     sides: {
       // Elbow angle: shoulder -> elbow (vertex) -> wrist.
       // All three are needed to measure the elbow; without them we cannot trust
@@ -68,6 +85,14 @@ export const EXERCISES = {
   situp: {
     id: 'situp',
     label: 'Sit-ups',
+    // A sit-up also starts from lying down, so we apply a light horizontal
+    // sanity check. BUT at the top of a sit-up your torso tilts well up off the
+    // floor, so we use a much more forgiving tilt threshold here (75 degrees)
+    // than push-ups do. The goal is only to reject an obviously fully-standing
+    // body, not to reject a normal sit-up. The user did not report sit-up
+    // miscounts, so this is a gentle safety net, not a tight gate.
+    orientation: 'horizontal',
+    orientationMaxTiltDegrees: 75,
     sides: {
       // Hip/torso angle: shoulder -> hip (vertex) -> knee.
       left: {
@@ -188,4 +213,61 @@ export function pickBetterSide(exerciseId, keypointsByName) {
     leftScore,
     rightScore,
   };
+}
+
+// MoveNet shoulder/hip keypoint names per side, used for the orientation check.
+const ORIENTATION_JOINTS = {
+  left: { shoulder: 'left_shoulder', hip: 'left_hip' },
+  right: { shoulder: 'right_shoulder', hip: 'right_hip' },
+};
+
+/**
+ * Decide whether the body is in the orientation this exercise expects, using
+ * the chosen (more visible) side's shoulder and hip.
+ *
+ * This is the gate that fixes the "standing and bending your arms counts as a
+ * push-up" bug: for push-ups (orientation 'horizontal') we only return true
+ * when the torso is roughly level with the floor.
+ *
+ * It is lenient on purpose:
+ *   - If the exercise does not care about orientation ('any'), we return true.
+ *   - If we cannot see the shoulder or hip on the chosen side, we return true
+ *     so a missing hip never blocks counting on its own. The separate
+ *     confidence (anti-cheat) gate is what handles "we cannot see you".
+ *
+ * Pure function: give it the exercise id, a keypoints-by-name map, and the side
+ * to use, and it returns true/false.
+ *
+ * @param {('pushup'|'situp')} exerciseId
+ * @param {Object<string,{x:number,y:number,score?:number}>} keypointsByName
+ * @param {('left'|'right')} side  The side pickBetterSide chose.
+ * @returns {boolean} true if the body meets the exercise's orientation expectation.
+ */
+export function evaluateOrientation(exerciseId, keypointsByName, side) {
+  const exercise = getExercise(exerciseId);
+
+  // No orientation requirement (or an unknown one) -> nothing to gate on.
+  if (!exercise.orientation || exercise.orientation === 'any') {
+    return true;
+  }
+
+  const names = ORIENTATION_JOINTS[side] || ORIENTATION_JOINTS.left;
+  const shoulder = keypointsByName ? keypointsByName[names.shoulder] : null;
+  const hip = keypointsByName ? keypointsByName[names.hip] : null;
+
+  // If either point is missing, do not block on orientation alone.
+  if (!shoulder || !hip) {
+    return true;
+  }
+
+  if (exercise.orientation === 'horizontal') {
+    const options = {};
+    if (typeof exercise.orientationMaxTiltDegrees === 'number') {
+      options.maxTiltDegrees = exercise.orientationMaxTiltDegrees;
+    }
+    return isBodyHorizontal(shoulder, hip, options);
+  }
+
+  // Unknown orientation value: fail open (do not block counting).
+  return true;
 }

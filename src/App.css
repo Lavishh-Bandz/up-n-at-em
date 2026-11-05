@@ -244,6 +244,41 @@
   font-weight: 700;
 }
 
+/* "Get into position…" prompt shown before a step arms. */
+.hud-arming {
+  color: var(--accent-2);
+  font-size: 1.1rem;
+  font-weight: 700;
+}
+
+/* "✓ Ready — GO!" shown once the position is confirmed and counting begins. */
+.hud-armed {
+  color: var(--accent);
+  font-size: 1.1rem;
+  font-weight: 800;
+}
+
+/* The big get-into-position countdown (5-4-3-2-1). */
+.hud-countdown {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.hud-countdown-number {
+  color: var(--accent-2);
+  font-size: 4rem;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.hud-countdown-hint {
+  color: var(--accent-2);
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
 /* ---- Emergency exit ----------------------------------------------------- */
 .emergency-exit {
   text-align: center;

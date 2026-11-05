@@ -22,11 +22,23 @@ import ProgressHud from './ProgressHud.jsx';
 import EmergencyExit from './EmergencyExit.jsx';
 import { createWorkoutQueue } from '../logic/workoutQueue.js';
 import { createRepCounter } from '../logic/repCounter.js';
-import { getPreset, pickBetterSide } from '../logic/exercises.js';
-import { angleBetween, allConfident } from '../logic/angles.js';
+import { getPreset, pickBetterSide, evaluateOrientation } from '../logic/exercises.js';
+import { angleBetween, allConfident, createAngleSmoother } from '../logic/angles.js';
+import { createPositionGate } from '../logic/positionGate.js';
+
+// How many recent angle readings we average together to calm down detector
+// jitter before the rep counter sees them. A small window keeps fast reps
+// responsive while still smoothing single-frame wobbles.
+const SMOOTHING_WINDOW = 5;
 
 // Minimum keypoint score we trust for counting a rep (anti-cheat gate).
 const MIN_CONFIDENCE = 0.3;
+
+// How long (ms) of IN-POSITION time the user must rack up before a step "arms"
+// and we start counting. This drives the 5-second get-into-position countdown:
+// the time only ticks down while you are actually in position (it pauses when
+// you are not), so a brief flicker barely moves it.
+const ARMING_HOLD_MS = 5000;
 
 /**
  * Build a rep counter configured for a specific workout step.
@@ -63,17 +75,44 @@ export default function WorkoutSession({
   if (counterRef.current === null) {
     counterRef.current = makeCounterForStep(steps[0]);
   }
+  // Smooths the tracked angle over the last few frames so detector jitter does
+  // not flicker the counter. Reset whenever we move to a new step.
+  const smootherRef = useRef(null);
+  if (smootherRef.current === null) {
+    smootherRef.current = createAngleSmoother({ windowSize: SMOOTHING_WINDOW });
+  }
+  // The "get into position first" gate for the CURRENT step. While it is not
+  // armed we do not count reps; the user must hold the correct position for
+  // ARMING_HOLD_MS before counting begins. Reset at the start of each step.
+  const positionGateRef = useRef(null);
+  if (positionGateRef.current === null) {
+    positionGateRef.current = createPositionGate({ holdMs: ARMING_HOLD_MS });
+  }
 
   // React state mirrors just what the HUD needs to render.
   const [stepIndex, setStepIndex] = useState(0);
   const [reps, setReps] = useState(0);
   const [confident, setConfident] = useState(false);
+  // Is the current step armed (position confirmed, now counting)? Starts false
+  // so the HUD shows the "get into position" prompt first.
+  const [armed, setArmed] = useState(false);
+  // Whole seconds left on the get-into-position countdown (5 -> 1). The HUD
+  // shows this as a big number while the step is still arming.
+  const [countdownSeconds, setCountdownSeconds] = useState(
+    Math.ceil(ARMING_HOLD_MS / 1000)
+  );
+  // Is the countdown PAUSED mid-way (some time banked, but currently out of
+  // position)? The HUD uses this to show a "get back into position" hint.
+  const [countdownPaused, setCountdownPaused] = useState(false);
 
   // The pose handler runs every animation frame. To avoid re-rendering the HUD
   // at frame rate, we remember the last value we pushed into each piece of
   // state and only call the setter when the value actually changed.
   const lastRepsRef = useRef(0);
   const lastConfidentRef = useRef(false);
+  const lastArmedRef = useRef(false);
+  const lastCountdownRef = useRef(Math.ceil(ARMING_HOLD_MS / 1000));
+  const lastPausedRef = useRef(false);
 
   // Small helpers: only update state when the value is different from last time.
   function updateConfident(value) {
@@ -86,6 +125,26 @@ export default function WorkoutSession({
     if (lastRepsRef.current !== value) {
       lastRepsRef.current = value;
       setReps(value);
+    }
+  }
+  function updateArmed(value) {
+    if (lastArmedRef.current !== value) {
+      lastArmedRef.current = value;
+      setArmed(value);
+    }
+  }
+  // Only re-render when the WHOLE second changes, so micro-jitter in the
+  // millisecond countdown never flickers the on-screen number.
+  function updateCountdownSeconds(value) {
+    if (lastCountdownRef.current !== value) {
+      lastCountdownRef.current = value;
+      setCountdownSeconds(value);
+    }
+  }
+  function updatePaused(value) {
+    if (lastPausedRef.current !== value) {
+      lastPausedRef.current = value;
+      setCountdownPaused(value);
     }
   }
 
@@ -112,15 +171,58 @@ export default function WorkoutSession({
 
     // 1. Pick whichever side of the body (left or right) the camera can see
     //    best right now, so a user facing either way still counts reps.
-    const { angleJoints, requiredKeypoints } = pickBetterSide(step.exercise, keypoints);
+    const { side, angleJoints, requiredKeypoints } = pickBetterSide(
+      step.exercise,
+      keypoints
+    );
 
     // 2. Gather the keypoints that side needs and check their confidence.
     const needed = requiredKeypoints.map((name) => keypoints[name]);
-    const isConfident =
+    const jointsConfident =
       needed.every(Boolean) && allConfident(needed, MIN_CONFIDENCE);
+
+    // 3. Body-orientation gate (anti-cheat, part 2). For push-ups this requires
+    //    your torso to be roughly horizontal, so standing up and just bending
+    //    your elbows does NOT count. Exercises that do not care about
+    //    orientation ('any') always pass this check.
+    const orientationOk = evaluateOrientation(step.exercise, keypoints, side);
+
+    // You only truly count when BOTH the joints are clearly visible AND the body
+    // is in the right position.
+    const isConfident = jointsConfident && orientationOk;
     updateConfident(isConfident);
 
-    // 3. Compute the tracked joint angle (e.g. the elbow for a push-up) on the
+    // 3b. ARMING GATE ("get into position first"). Before we count ANY reps for
+    //     this step, the user must hold the exercise's expected position for a
+    //     short moment (ARMING_HOLD_MS). We feed the gate whether the body is in
+    //     position right now (joints visible AND orientation OK) along with a
+    //     frame timestamp, so a brief flicker through the position does not arm.
+    //     While not armed, the HUD shows "Get into position…" and we skip rep
+    //     counting entirely.
+    //
+    //     Mid-set note: once armed we stay armed for the rest of the step, even
+    //     if the user briefly leaves position. The per-rep orientation gate above
+    //     already rejects bad reps, so there is no need to disarm. We only ever
+    //     re-arm from scratch when a NEW step begins (see step advance below).
+    const nowMs =
+      typeof performance !== 'undefined' && performance.now
+        ? performance.now()
+        : Date.now();
+    const { armed: isArmed, heldMs, remainingSeconds } =
+      positionGateRef.current.update(isConfident, nowMs);
+    updateArmed(isArmed);
+    if (!isArmed) {
+      // Not armed yet: do not count reps. Drive the get-into-position countdown
+      // instead. Feed the HUD the whole-seconds number (guarded so it only
+      // re-renders when the integer second changes) and a "paused" flag for
+      // when the countdown has started (some time banked) but the user is
+      // currently OUT of position, so the HUD can tell them to get back.
+      updateCountdownSeconds(remainingSeconds);
+      updatePaused(heldMs > 0 && !isConfident);
+      return;
+    }
+
+    // 4. Compute the tracked joint angle (e.g. the elbow for a push-up) on the
     //    chosen side.
     let angle = null;
     const [aName, vName, cName] = angleJoints;
@@ -131,7 +233,7 @@ export default function WorkoutSession({
       angle = angleBetween(a, v, c);
     }
 
-    // 4. If we could not compute an angle, there is nothing reliable to feed the
+    // 5. If we could not compute an angle, there is nothing reliable to feed the
     //    rep counter, so treat the frame as not-confident and skip the rep
     //    update entirely. (A null-guarded early return is clearer and safer than
     //    passing a fake fallback angle: it can never nudge the counter, even if a
@@ -141,9 +243,16 @@ export default function WorkoutSession({
       return;
     }
 
-    // 5. Feed the reading into the rep counter. The counter still ignores the
-    //    reading if it is not confident (anti-cheat).
-    counter.update(angle, isConfident);
+    // 6. Smooth the angle over the last few frames before the counter sees it.
+    //    This calms down detector jitter so the counting is steadier and a
+    //    single bad frame cannot spike a fake threshold crossing. Smoothing is
+    //    layered ON TOP of the hysteresis band and anti-cheat gate, not instead
+    //    of them.
+    const smoothedAngle = smootherRef.current.push(angle);
+
+    // 7. Feed the smoothed reading into the rep counter. The counter still
+    //    ignores the reading if it is not confident (anti-cheat + orientation).
+    counter.update(smoothedAngle, isConfident);
 
     // 6. Sync the queue's tally with the counter and update the HUD.
     const stepReps = queue.setReps(counter.reps);
@@ -159,6 +268,15 @@ export default function WorkoutSession({
       }
       if (queue.advance()) {
         counterRef.current = makeCounterForStep(queue.current());
+        smootherRef.current.reset(); // fresh smoothing for the new exercise
+        // Re-arm from scratch: the next exercise needs a different start
+        // position (e.g. push-up plank vs. lying down for sit-ups), so the user
+        // must get into position again before counting resumes.
+        positionGateRef.current.reset();
+        updateArmed(false);
+        // Fresh countdown for the new step: back to the full 5 and not paused.
+        updateCountdownSeconds(Math.ceil(ARMING_HOLD_MS / 1000));
+        updatePaused(false);
         setStepIndex(queue.currentIndex());
         updateReps(0);
       }
@@ -182,6 +300,9 @@ export default function WorkoutSession({
         stepIndex={stepIndex}
         stepCount={steps.length}
         confident={confident}
+        armed={armed}
+        countdownSeconds={countdownSeconds}
+        countdownPaused={countdownPaused}
         alarmPlaying={alarm.playing}
       />
 

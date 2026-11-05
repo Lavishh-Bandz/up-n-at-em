@@ -6,7 +6,10 @@ import {
   getPreset,
   sumSideConfidence,
   pickBetterSide,
+  evaluateOrientation,
 } from '../exercises.js';
+import { createRepCounter } from '../repCounter.js';
+import { angleBetween } from '../angles.js';
 
 describe('exercise descriptors', () => {
   it('defines pushup and situp', () => {
@@ -170,5 +173,103 @@ describe('pickBetterSide', () => {
     expect(result.side).toBe('left');
     expect(result.leftScore).toBe(0);
     expect(result.rightScore).toBe(0);
+  });
+});
+
+describe('exercise orientation descriptors', () => {
+  it('push-ups require a horizontal body', () => {
+    expect(EXERCISES.pushup.orientation).toBe('horizontal');
+  });
+
+  it('sit-ups use a lenient horizontal sanity check', () => {
+    expect(EXERCISES.situp.orientation).toBe('horizontal');
+    expect(EXERCISES.situp.orientationMaxTiltDegrees).toBeGreaterThan(45);
+  });
+});
+
+describe('evaluateOrientation', () => {
+  it('passes a push-up when the body is horizontal', () => {
+    // Shoulder and hip at the same height (lying down / push-up position).
+    const keypoints = {
+      left_shoulder: { x: 100, y: 300, score: 0.9 },
+      left_hip: { x: 300, y: 305, score: 0.9 },
+    };
+    expect(evaluateOrientation('pushup', keypoints, 'left')).toBe(true);
+  });
+
+  it('rejects a push-up when the body is standing upright', () => {
+    // Shoulder high, hip far below: an upright standing torso.
+    const keypoints = {
+      left_shoulder: { x: 100, y: 100, score: 0.9 },
+      left_hip: { x: 108, y: 350, score: 0.9 },
+    };
+    expect(evaluateOrientation('pushup', keypoints, 'left')).toBe(false);
+  });
+
+  it('does not block when the shoulder or hip is missing (confidence gate handles that)', () => {
+    expect(evaluateOrientation('pushup', { left_shoulder: { x: 1, y: 1 } }, 'left')).toBe(true);
+    expect(evaluateOrientation('pushup', {}, 'left')).toBe(true);
+  });
+});
+
+describe('push-up anti-cheat: body orientation gates counting', () => {
+  // Build a keypoints map for a chosen side with a given elbow angle and body
+  // orientation. We only need the shoulder/elbow/wrist (for the elbow angle)
+  // and shoulder/hip (for the orientation check).
+  function pushupFrame({ elbowAngle, horizontal }) {
+    // Place the elbow (vertex) at the origin. The shoulder arm points one way;
+    // the wrist arm is rotated by elbowAngle so angleBetween returns elbowAngle.
+    const vertex = { x: 0, y: 0, score: 0.9 };
+    const shoulder = { x: -100, y: 0, score: 0.9 }; // arm toward -x (180 degrees)
+    const rad = (elbowAngle * Math.PI) / 180;
+    const wrist = {
+      x: -100 * Math.cos(rad),
+      y: -100 * Math.sin(rad),
+      score: 0.9,
+    };
+    // Hip position sets the body orientation relative to the shoulder.
+    const hip = horizontal
+      ? { x: shoulder.x + 200, y: shoulder.y + 5, score: 0.9 } // flat torso
+      : { x: shoulder.x + 8, y: shoulder.y + 300, score: 0.9 }; // upright torso
+    return {
+      left_shoulder: shoulder,
+      left_elbow: vertex,
+      left_wrist: wrist,
+      left_hip: hip,
+    };
+  }
+
+  // A helper that mirrors how WorkoutSession feeds the counter: compute the
+  // angle, check orientation, and only count as confident when orientation is OK.
+  function feed(counter, frame) {
+    const { side, angleJoints } = pickBetterSide('pushup', frame);
+    const [aName, vName, cName] = angleJoints;
+    const angle = angleBetween(frame[aName], frame[vName], frame[cName]);
+    const orientationOk = evaluateOrientation('pushup', frame, side);
+    counter.update(angle, orientationOk);
+  }
+
+  it('counts ZERO reps when standing and just bending the arms', () => {
+    const preset = getPreset('pushup', 'standard');
+    const counter = createRepCounter(preset);
+
+    // A full down->up elbow motion, but the body is UPRIGHT the whole time.
+    feed(counter, pushupFrame({ elbowAngle: 170, horizontal: false })); // arms straight
+    feed(counter, pushupFrame({ elbowAngle: 80, horizontal: false }));  // bend
+    feed(counter, pushupFrame({ elbowAngle: 170, horizontal: false })); // straighten
+
+    expect(counter.reps).toBe(0);
+  });
+
+  it('counts reps for a real horizontal-body down->up push-up', () => {
+    const preset = getPreset('pushup', 'standard');
+    const counter = createRepCounter(preset);
+
+    // Same elbow motion, but now the torso is HORIZONTAL (real push-up).
+    feed(counter, pushupFrame({ elbowAngle: 170, horizontal: true })); // top
+    feed(counter, pushupFrame({ elbowAngle: 80, horizontal: true }));  // bottom
+    feed(counter, pushupFrame({ elbowAngle: 170, horizontal: true })); // back up -> 1 rep
+
+    expect(counter.reps).toBe(1);
   });
 });
