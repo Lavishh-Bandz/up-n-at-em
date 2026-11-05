@@ -84,6 +84,12 @@ export function useAlarm() {
   /**
    * Stop the alarm. Only the app calls this: on workout completion or via the
    * emergency escape. There is deliberately no manual mute button bound to it.
+   *
+   * As well as going silent, we actually SUSPEND the AudioContext so the audio
+   * graph stops running and releases the audio hardware promptly, instead of
+   * leaving a silent oscillator ticking away until the component unmounts. The
+   * context is resumed again by the next start(), so the caller's view of
+   * start()/stop()/playing is unchanged.
    */
   const stop = useCallback(() => {
     if (beepTimerRef.current != null) {
@@ -93,7 +99,18 @@ export function useAlarm() {
     const gain = gainRef.current;
     const ctx = ctxRef.current;
     if (gain && ctx) {
-      gain.gain.setTargetAtTime(0, ctx.currentTime, 0.01);
+      // Snap the volume to zero immediately so nothing is heard while the
+      // context winds down.
+      gain.gain.cancelScheduledValues(ctx.currentTime);
+      gain.gain.setValueAtTime(0, ctx.currentTime);
+    }
+    // Suspend the context: this pauses the audio clock and lets the browser
+    // release the audio hardware. suspend() returns a promise; we don't need to
+    // await it, and we guard with a catch so a late/duplicate call can't throw.
+    if (ctx && ctx.state === 'running') {
+      Promise.resolve(ctx.suspend()).catch(() => {
+        // Context already suspended or closed; nothing to do.
+      });
     }
     setPlaying(false);
   }, []);

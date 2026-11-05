@@ -62,7 +62,7 @@ This is the interesting part, and it's simpler than it sounds. Here's the whole 
    - **Push-ups:** we measure the **elbow angle** (the corner formed by your shoulder → elbow → wrist). Arms straight ≈ 180°, elbow bent at the bottom ≈ 90°.
    - **Sit-ups:** we measure the **hip / torso angle** (shoulder → hip → knee). Lying flat ≈ wide open, sitting up ≈ folded shut.
 
-   The math for "the angle at a corner given three points" lives in [`src/logic/angles.js`](src/logic/angles.js), with the geometry explained in plain comments.
+   The camera only ever sees one side of you clearly, so each frame we check **both your left and right side** and use whichever one the camera can see best. That means it doesn't matter which way you face: if your left arm is hidden behind your body, the app automatically tracks your right arm instead. The "pick the more visible side" logic lives in [`src/logic/exercises.js`](src/logic/exercises.js) (`pickBetterSide`), and the math for "the angle at a corner given three points" lives in [`src/logic/angles.js`](src/logic/angles.js), with the geometry explained in plain comments.
 
 **4. We count a rep on a full down-then-up movement.** A little state machine watches the angle:
    - It starts in the **up** position (e.g. arms straight).

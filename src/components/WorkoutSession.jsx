@@ -22,7 +22,7 @@ import ProgressHud from './ProgressHud.jsx';
 import EmergencyExit from './EmergencyExit.jsx';
 import { createWorkoutQueue } from '../logic/workoutQueue.js';
 import { createRepCounter } from '../logic/repCounter.js';
-import { getExercise, getPreset } from '../logic/exercises.js';
+import { getExercise, getPreset, pickBetterSide } from '../logic/exercises.js';
 import { angleBetween, allConfident } from '../logic/angles.js';
 
 // Minimum keypoint score we trust for counting a rep (anti-cheat gate).
@@ -69,6 +69,26 @@ export default function WorkoutSession({
   const [reps, setReps] = useState(0);
   const [confident, setConfident] = useState(false);
 
+  // The pose handler runs every animation frame. To avoid re-rendering the HUD
+  // at frame rate, we remember the last value we pushed into each piece of
+  // state and only call the setter when the value actually changed.
+  const lastRepsRef = useRef(0);
+  const lastConfidentRef = useRef(false);
+
+  // Small helpers: only update state when the value is different from last time.
+  function updateConfident(value) {
+    if (lastConfidentRef.current !== value) {
+      lastConfidentRef.current = value;
+      setConfident(value);
+    }
+  }
+  function updateReps(value) {
+    if (lastRepsRef.current !== value) {
+      lastRepsRef.current = value;
+      setReps(value);
+    }
+  }
+
   const currentStep = steps[stepIndex];
   const exercise = useMemo(() => getExercise(currentStep.exercise), [currentStep]);
 
@@ -91,17 +111,20 @@ export default function WorkoutSession({
     const step = queue.current();
     if (!step) return;
 
-    const desc = getExercise(step.exercise);
+    // 1. Pick whichever side of the body (left or right) the camera can see
+    //    best right now, so a user facing either way still counts reps.
+    const { angleJoints, requiredKeypoints } = pickBetterSide(step.exercise, keypoints);
 
-    // 1. Gather the keypoints this exercise needs and check confidence.
-    const needed = desc.requiredKeypoints.map((name) => keypoints[name]);
+    // 2. Gather the keypoints that side needs and check their confidence.
+    const needed = requiredKeypoints.map((name) => keypoints[name]);
     const isConfident =
       needed.every(Boolean) && allConfident(needed, MIN_CONFIDENCE);
-    setConfident(isConfident);
+    updateConfident(isConfident);
 
-    // 2. Compute the tracked joint angle (e.g. the elbow for a push-up).
+    // 3. Compute the tracked joint angle (e.g. the elbow for a push-up) on the
+    //    chosen side.
     let angle = null;
-    const [aName, vName, cName] = desc.angleJoints;
+    const [aName, vName, cName] = angleJoints;
     const a = keypoints[aName];
     const v = keypoints[vName];
     const c = keypoints[cName];
@@ -109,14 +132,23 @@ export default function WorkoutSession({
       angle = angleBetween(a, v, c);
     }
 
-    // 3. Feed the reading into the rep counter. The counter ignores the reading
-    //    entirely if it is not confident (anti-cheat), so we pass a safe angle
-    //    when we could not compute one.
-    counter.update(angle == null ? desc.difficulties[step.difficulty].upAngle : angle, isConfident);
+    // 4. If we could not compute an angle, there is nothing reliable to feed the
+    //    rep counter, so treat the frame as not-confident and skip the rep
+    //    update entirely. (A null-guarded early return is clearer and safer than
+    //    passing a fake fallback angle: it can never nudge the counter, even if a
+    //    future exercise's required keypoints differ from its angle joints.)
+    if (angle == null) {
+      updateConfident(false);
+      return;
+    }
 
-    // 4. Sync the queue's tally with the counter and update the HUD.
+    // 5. Feed the reading into the rep counter. The counter still ignores the
+    //    reading if it is not confident (anti-cheat).
+    counter.update(angle, isConfident);
+
+    // 6. Sync the queue's tally with the counter and update the HUD.
     const stepReps = queue.setReps(counter.reps);
-    setReps(stepReps);
+    updateReps(stepReps);
 
     // 5. Step finished? Advance to the next one (with a fresh counter).
     if (queue.isStepComplete()) {
@@ -129,7 +161,7 @@ export default function WorkoutSession({
       if (queue.advance()) {
         counterRef.current = makeCounterForStep(queue.current());
         setStepIndex(queue.currentIndex());
-        setReps(0);
+        updateReps(0);
       }
     }
   }
