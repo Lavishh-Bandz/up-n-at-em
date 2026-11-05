@@ -16,13 +16,13 @@
 //   - Reps only count when the exercise's required keypoints are confidently
 //     visible (anti-cheat), using the pure repCounter + angle helpers.
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import CameraView from './CameraView.jsx';
 import ProgressHud from './ProgressHud.jsx';
 import EmergencyExit from './EmergencyExit.jsx';
 import { createWorkoutQueue } from '../logic/workoutQueue.js';
 import { createRepCounter } from '../logic/repCounter.js';
-import { getExercise, getPreset, pickBetterSide } from '../logic/exercises.js';
+import { getPreset, pickBetterSide } from '../logic/exercises.js';
 import { angleBetween, allConfident } from '../logic/angles.js';
 
 // Minimum keypoint score we trust for counting a rep (anti-cheat gate).
@@ -90,7 +90,6 @@ export default function WorkoutSession({
   }
 
   const currentStep = steps[stepIndex];
-  const exercise = useMemo(() => getExercise(currentStep.exercise), [currentStep]);
 
   // ---- Start the alarm when the session mounts -----------------------------
   // The click that led here was a user gesture, so audio is allowed.
@@ -150,7 +149,7 @@ export default function WorkoutSession({
     const stepReps = queue.setReps(counter.reps);
     updateReps(stepReps);
 
-    // 5. Step finished? Advance to the next one (with a fresh counter).
+    // 7. Step finished? Advance to the next one (with a fresh counter).
     if (queue.isStepComplete()) {
       if (queue.isWorkoutComplete()) {
         // Whole workout done: THIS is the only normal way the alarm stops.
