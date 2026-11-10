@@ -57,33 +57,39 @@ export default function ProgressHud({
 
       <div className="hud-row hud-exercise">{label}</div>
 
-      {/* ARMING: before counting starts we ask the user to get into position.
-          The screen walks through three looks:
+      {/* ARMING SLOT: before counting starts we ask the user to get into
+          position. The slot walks through three looks:
             1. "Get into position…" before any time has banked,
             2. a big 5-4-3-2-1 countdown that only runs while you ARE in position
                (it pauses with a hint if you step out), and
             3. "✓ Ready — GO!" once the countdown hits zero and counting begins.
-          The alarm keeps blaring the whole time either way. */}
-      {armed ? (
-        <div className="hud-row hud-armed" role="status">
-          ✓ Ready — GO!
-        </div>
-      ) : countdownStarted ? (
-        <div className="hud-row hud-countdown" role="status" aria-live="polite">
-          <div className="hud-countdown-number">{countdownSeconds}</div>
-          {countdownPaused ? (
-            <div className="hud-countdown-hint">
-              Paused — get back into {positionLabel} position…
-            </div>
-          ) : (
-            <div className="hud-countdown-hint">Hold it… counting down!</div>
-          )}
-        </div>
-      ) : (
-        <div className="hud-row hud-arming" role="status">
-          Get into {positionLabel} position…
-        </div>
-      )}
+          The alarm keeps blaring the whole time either way.
+
+          LAYOUT NOTE: all three looks live inside ONE fixed-height slot
+          (.hud-arming-slot) so switching between them never resizes the panel.
+          Only the text inside the slot changes; the box stays put. */}
+      <div className="hud-row hud-arming-slot">
+        {armed ? (
+          <div className="hud-armed" role="status">
+            ✓ Ready — GO!
+          </div>
+        ) : countdownStarted ? (
+          <div className="hud-countdown" role="status" aria-live="polite">
+            <div className="hud-countdown-number">{countdownSeconds}</div>
+            {countdownPaused ? (
+              <div className="hud-countdown-hint">
+                Paused — get back into {positionLabel} position…
+              </div>
+            ) : (
+              <div className="hud-countdown-hint">Hold it… counting down!</div>
+            )}
+          </div>
+        ) : (
+          <div className="hud-arming" role="status">
+            Get into {positionLabel} position…
+          </div>
+        )}
+      </div>
 
       <div className="hud-row hud-reps">
         <span className="hud-reps-count">{reps}</span>
@@ -92,19 +98,33 @@ export default function ProgressHud({
       </div>
 
       {/* Anti-cheat feedback: if the pose is not confidently detected, reps are
-          not being counted, so tell the user to get back in frame. */}
-      {!confident && (
-        <div className="hud-row hud-warning" role="status">
-          ⚠️ Pose not detected — make sure your whole body is in frame and
-          well lit. Reps only count when the camera can see you clearly.
-        </div>
-      )}
+          not being counted, so tell the user to get back in frame.
 
-      {alarmPlaying && (
-        <div className="hud-row hud-alarm" role="status">
-          🔔 Alarm is playing — finish your reps to silence it!
-        </div>
-      )}
+          LAYOUT NOTE: this row is ALWAYS rendered and simply hidden (made
+          invisible but still taking up its space) when the pose is fine, so the
+          warning appearing/disappearing never pushes the rest of the panel
+          around. The `confident` value here is already DEBOUNCED by the parent,
+          so it will not flicker on a single bad frame. */}
+      <div
+        className={
+          'hud-row hud-warning' + (confident ? ' hud-row-hidden' : '')
+        }
+        role="status"
+      >
+        ⚠️ Pose not detected — make sure your whole body is in frame and
+        well lit. Reps only count when the camera can see you clearly.
+      </div>
+
+      {/* The alarm row is likewise always present and just hidden when the
+          alarm is not sounding, so the panel keeps a steady height. */}
+      <div
+        className={
+          'hud-row hud-alarm' + (alarmPlaying ? '' : ' hud-row-hidden')
+        }
+        role="status"
+      >
+        🔔 Alarm is playing — finish your reps to silence it!
+      </div>
     </div>
   );
 }

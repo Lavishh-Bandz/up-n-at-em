@@ -239,9 +239,31 @@
   line-height: 1.4;
 }
 
+/* Layout stability: a row kept in the DOM but hidden. It still takes up its
+   normal space (so the panel keeps the same size), it just cannot be seen and
+   is skipped by screen readers. We use this for the warning and alarm rows so
+   they can appear/disappear WITHOUT shoving the rest of the panel up or down. */
+.hud-row-hidden {
+  visibility: hidden;
+}
+
 .hud-alarm {
   color: var(--accent);
   font-weight: 700;
+}
+
+/* The arming area holds three different looks (the "get into position" prompt,
+   the big countdown, and "Ready — GO!") that are swapped in and out. They are
+   different heights, so without help the panel would resize as they switch.
+   We give the slot a FIXED min-height (tall enough for the biggest look, the
+   countdown number + hint) and center its contents, so switching looks only
+   changes the text, never the panel size. */
+.hud-arming-slot {
+  min-height: 5.5rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
 }
 
 /* "Get into position…" prompt shown before a step arms. */

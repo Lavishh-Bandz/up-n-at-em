@@ -25,6 +25,7 @@ import { createRepCounter } from '../logic/repCounter.js';
 import { getPreset, pickBetterSide, evaluateOrientation } from '../logic/exercises.js';
 import { angleBetween, allConfident, createAngleSmoother } from '../logic/angles.js';
 import { createPositionGate } from '../logic/positionGate.js';
+import { createStatusDebouncer } from '../logic/statusDebounce.js';
 
 // How many recent angle readings we average together to calm down detector
 // jitter before the rep counter sees them. A small window keeps fast reps
@@ -88,11 +89,21 @@ export default function WorkoutSession({
   if (positionGateRef.current === null) {
     positionGateRef.current = createPositionGate({ holdMs: ARMING_HOLD_MS });
   }
+  // Calms the "Pose not detected" WARNING so a single bad frame does not blink
+  // it on and off. This is DISPLAY-ONLY: it never touches rep counting or the
+  // position gate, which keep using the raw per-frame confidence below.
+  const statusDebouncerRef = useRef(null);
+  if (statusDebouncerRef.current === null) {
+    statusDebouncerRef.current = createStatusDebouncer();
+  }
 
   // React state mirrors just what the HUD needs to render.
   const [stepIndex, setStepIndex] = useState(0);
   const [reps, setReps] = useState(0);
-  const [confident, setConfident] = useState(false);
+  // The DEBOUNCED "pose detected" value used only to show/hide the HUD warning.
+  // Starts true (optimistic) so no warning flashes before the first frame. Rep
+  // counting and the position gate never read this; they use raw isConfident.
+  const [displayConfident, setDisplayConfident] = useState(true);
   // Is the current step armed (position confirmed, now counting)? Starts false
   // so the HUD shows the "get into position" prompt first.
   const [armed, setArmed] = useState(false);
@@ -109,16 +120,19 @@ export default function WorkoutSession({
   // at frame rate, we remember the last value we pushed into each piece of
   // state and only call the setter when the value actually changed.
   const lastRepsRef = useRef(0);
-  const lastConfidentRef = useRef(false);
+  const lastDisplayConfidentRef = useRef(true);
   const lastArmedRef = useRef(false);
   const lastCountdownRef = useRef(Math.ceil(ARMING_HOLD_MS / 1000));
   const lastPausedRef = useRef(false);
 
   // Small helpers: only update state when the value is different from last time.
-  function updateConfident(value) {
-    if (lastConfidentRef.current !== value) {
-      lastConfidentRef.current = value;
-      setConfident(value);
+  // This mirrors the debounced "pose detected" value into the HUD, and only
+  // re-renders when it actually changes (the debouncer already smooths it, so
+  // this does not flicker at frame rate).
+  function updateDisplayConfident(value) {
+    if (lastDisplayConfidentRef.current !== value) {
+      lastDisplayConfidentRef.current = value;
+      setDisplayConfident(value);
     }
   }
   function updateReps(value) {
@@ -190,7 +204,19 @@ export default function WorkoutSession({
     // You only truly count when BOTH the joints are clearly visible AND the body
     // is in the right position.
     const isConfident = jointsConfident && orientationOk;
-    updateConfident(isConfident);
+
+    // A single frame timestamp used by both the arming gate and the warning
+    // debouncer below. Prefer performance.now(); fall back to Date.now().
+    const nowMs =
+      typeof performance !== 'undefined' && performance.now
+        ? performance.now()
+        : Date.now();
+
+    // Debounce the value used for the HUD WARNING ONLY. Good news (detected)
+    // shows instantly; the "not detected" warning only appears after the pose
+    // has been unclear for a short grace period, so a single bad frame does not
+    // blink the warning on and off. This does NOT affect counting or arming.
+    updateDisplayConfident(statusDebouncerRef.current.update(isConfident, nowMs));
 
     // 3b. ARMING GATE ("get into position first"). Before we count ANY reps for
     //     this step, the user must hold the exercise's expected position for a
@@ -204,10 +230,6 @@ export default function WorkoutSession({
     //     if the user briefly leaves position. The per-rep orientation gate above
     //     already rejects bad reps, so there is no need to disarm. We only ever
     //     re-arm from scratch when a NEW step begins (see step advance below).
-    const nowMs =
-      typeof performance !== 'undefined' && performance.now
-        ? performance.now()
-        : Date.now();
     const { armed: isArmed, heldMs, remainingSeconds } =
       positionGateRef.current.update(isConfident, nowMs);
     updateArmed(isArmed);
@@ -239,7 +261,9 @@ export default function WorkoutSession({
     //    passing a fake fallback angle: it can never nudge the counter, even if a
     //    future exercise's required keypoints differ from its angle joints.)
     if (angle == null) {
-      updateConfident(false);
+      // We briefly cannot read the angle: treat it as a not-detected frame for
+      // the warning (still debounced, so one bad frame will not blink it).
+      updateDisplayConfident(statusDebouncerRef.current.update(false, nowMs));
       return;
     }
 
@@ -273,6 +297,7 @@ export default function WorkoutSession({
         // position (e.g. push-up plank vs. lying down for sit-ups), so the user
         // must get into position again before counting resumes.
         positionGateRef.current.reset();
+        statusDebouncerRef.current.reset(); // fresh optimistic warning state
         updateArmed(false);
         // Fresh countdown for the new step: back to the full 5 and not paused.
         updateCountdownSeconds(Math.ceil(ARMING_HOLD_MS / 1000));
@@ -299,7 +324,7 @@ export default function WorkoutSession({
         targetReps={currentStep.targetReps}
         stepIndex={stepIndex}
         stepCount={steps.length}
-        confident={confident}
+        confident={displayConfident}
         armed={armed}
         countdownSeconds={countdownSeconds}
         countdownPaused={countdownPaused}
