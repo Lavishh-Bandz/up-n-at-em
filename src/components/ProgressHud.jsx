@@ -42,6 +42,15 @@ export default function ProgressHud({
   const label = EXERCISES[exerciseId]?.label ?? exerciseId;
   const positionLabel = POSITION_LABELS[exerciseId] ?? label;
 
+  // What the user needs in frame differs by exercise. Push-ups are counted from
+  // the VISIBLE UPPER BODY (shoulders/head), so we must NOT tell push-up users
+  // to fit their "whole body" — that is the very problem this redesign fixes.
+  // Sit-ups still read the hip/torso, so their framing hint is unchanged.
+  const framingHint =
+    exerciseId === 'pushup'
+      ? 'make sure your head and shoulders are in frame and well lit'
+      : 'make sure your whole body is in frame and well lit';
+
   // The countdown is still at its very start (full time left and not paused)
   // when the user has not actually got into position yet. In that case we show
   // the plain "get into position" prompt. Once even a little time has ticked
@@ -111,8 +120,8 @@ export default function ProgressHud({
         }
         role="status"
       >
-        ⚠️ Pose not detected — make sure your whole body is in frame and
-        well lit. Reps only count when the camera can see you clearly.
+        ⚠️ Pose not detected — {framingHint}. Reps only count when the camera
+        can see you clearly.
       </div>
 
       {/* The alarm row is likewise always present and just hidden when the

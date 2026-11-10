@@ -22,8 +22,10 @@ import ProgressHud from './ProgressHud.jsx';
 import EmergencyExit from './EmergencyExit.jsx';
 import { createWorkoutQueue } from '../logic/workoutQueue.js';
 import { createRepCounter } from '../logic/repCounter.js';
+import { createVerticalRepCounter } from '../logic/verticalRepCounter.js';
 import { getPreset, pickBetterSide, evaluateOrientation } from '../logic/exercises.js';
 import { angleBetween, allConfident, createAngleSmoother } from '../logic/angles.js';
+import { measureBodyScale, measureUpperBodyY } from '../logic/upperBodySignal.js';
 import { createPositionGate } from '../logic/positionGate.js';
 import { createStatusDebouncer } from '../logic/statusDebounce.js';
 
@@ -43,9 +45,25 @@ const ARMING_HOLD_MS = 5000;
 
 /**
  * Build a rep counter configured for a specific workout step.
+ *
+ * The two exercises are counted in DIFFERENT ways, so we pick the matching
+ * counter here:
+ *   - PUSH-UPS watch the VISIBLE UPPER BODY move DOWN toward the floor and back
+ *     UP, so they use the position-based createVerticalRepCounter fed by the
+ *     body-scale fractions (downFraction / upFraction) from the preset.
+ *   - SIT-UPS watch the HIP/torso ANGLE open and close, so they keep using the
+ *     angle-based createRepCounter fed by the preset's downAngle / upAngle.
+ * getPreset already returns the right shape for each exercise (see exercises.js).
  */
 function makeCounterForStep(step) {
   const preset = getPreset(step.exercise, step.difficulty);
+  if (step.exercise === 'pushup') {
+    return createVerticalRepCounter({
+      downFraction: preset.downFraction,
+      upFraction: preset.upFraction,
+      minConfidence: MIN_CONFIDENCE,
+    });
+  }
   return createRepCounter({
     downAngle: preset.downAngle,
     upAngle: preset.upAngle,
@@ -195,14 +213,18 @@ export default function WorkoutSession({
     const jointsConfident =
       needed.every(Boolean) && allConfident(needed, MIN_CONFIDENCE);
 
-    // 3. Body-orientation gate (anti-cheat, part 2). For push-ups this requires
-    //    your torso to be roughly horizontal, so standing up and just bending
-    //    your elbows does NOT count. Exercises that do not care about
-    //    orientation ('any') always pass this check.
+    // 3. Body-orientation gate (anti-cheat, part 2). For SIT-UPS this applies a
+    //    lenient "roughly horizontal" sanity check so an obviously standing body
+    //    is rejected. PUSH-UPS now use orientation 'any', so this check never
+    //    blocks them (it would need the hip, which is exactly the keypoint a
+    //    webcam cannot fit during a floor push-up). A standing push-up "bob" is
+    //    instead rejected by the body-relative vertical excursion + hysteresis
+    //    in createVerticalRepCounter plus the 5s arming countdown below.
     const orientationOk = evaluateOrientation(step.exercise, keypoints, side);
 
-    // You only truly count when BOTH the joints are clearly visible AND the body
-    // is in the right position.
+    // You only truly count when BOTH the required joints are clearly visible AND
+    // the body meets the exercise's orientation expectation (always true for
+    // push-ups, a lenient horizontal check for sit-ups).
     const isConfident = jointsConfident && orientationOk;
 
     // A single frame timestamp used by both the arming gate and the warning
@@ -244,45 +266,54 @@ export default function WorkoutSession({
       return;
     }
 
-    // 4. Compute the tracked joint angle (e.g. the elbow for a push-up) on the
-    //    chosen side.
-    let angle = null;
-    const [aName, vName, cName] = angleJoints;
-    const a = keypoints[aName];
-    const v = keypoints[vName];
-    const c = keypoints[cName];
-    if (a && v && c) {
-      angle = angleBetween(a, v, c);
+    // 4. Compute the tracked signal for THIS exercise and feed the counter.
+    //    The two exercises track different things, so the pipeline forks here:
+    //      - PUSH-UPS: the VISIBLE UPPER BODY's vertical position (shoulder,
+    //        averaged with the nose when present) plus a body-scale ruler, so a
+    //        down-then-up dip counts even with the legs/hips out of frame.
+    //      - SIT-UPS: the HIP/torso ANGLE (shoulder -> hip -> knee), exactly as
+    //        before — nothing about sit-ups changed.
+    //    In BOTH cases the raw reading is smoothed over the last few frames
+    //    (the smoother just averages numbers, so it smooths a y position just as
+    //    well as an angle) before the counter sees it, so detector jitter cannot
+    //    spike a fake threshold crossing. Smoothing is layered ON TOP of the
+    //    hysteresis band + anti-cheat gate, not instead of them. If we cannot
+    //    read a reliable signal this frame, we treat it like a not-detected
+    //    frame for the warning (still debounced) and early-return WITHOUT
+    //    advancing — a null-guarded skip can never nudge the counter.
+    if (step.exercise === 'pushup') {
+      // --- PUSH-UP: upper-body vertical movement ---
+      const currentY = measureUpperBodyY(keypoints, side);
+      const bodyScalePx = measureBodyScale(keypoints);
+      if (currentY == null || bodyScalePx == null) {
+        updateDisplayConfident(statusDebouncerRef.current.update(false, nowMs));
+        return;
+      }
+      const smoothedY = smootherRef.current.push(currentY);
+      counter.update(smoothedY, bodyScalePx, isConfident);
+    } else {
+      // --- SIT-UP: hip/torso angle (unchanged path) ---
+      let angle = null;
+      const [aName, vName, cName] = angleJoints;
+      const a = keypoints[aName];
+      const v = keypoints[vName];
+      const c = keypoints[cName];
+      if (a && v && c) {
+        angle = angleBetween(a, v, c);
+      }
+      if (angle == null) {
+        updateDisplayConfident(statusDebouncerRef.current.update(false, nowMs));
+        return;
+      }
+      const smoothedAngle = smootherRef.current.push(angle);
+      counter.update(smoothedAngle, isConfident);
     }
 
-    // 5. If we could not compute an angle, there is nothing reliable to feed the
-    //    rep counter, so treat the frame as not-confident and skip the rep
-    //    update entirely. (A null-guarded early return is clearer and safer than
-    //    passing a fake fallback angle: it can never nudge the counter, even if a
-    //    future exercise's required keypoints differ from its angle joints.)
-    if (angle == null) {
-      // We briefly cannot read the angle: treat it as a not-detected frame for
-      // the warning (still debounced, so one bad frame will not blink it).
-      updateDisplayConfident(statusDebouncerRef.current.update(false, nowMs));
-      return;
-    }
-
-    // 6. Smooth the angle over the last few frames before the counter sees it.
-    //    This calms down detector jitter so the counting is steadier and a
-    //    single bad frame cannot spike a fake threshold crossing. Smoothing is
-    //    layered ON TOP of the hysteresis band and anti-cheat gate, not instead
-    //    of them.
-    const smoothedAngle = smootherRef.current.push(angle);
-
-    // 7. Feed the smoothed reading into the rep counter. The counter still
-    //    ignores the reading if it is not confident (anti-cheat + orientation).
-    counter.update(smoothedAngle, isConfident);
-
-    // 6. Sync the queue's tally with the counter and update the HUD.
+    // 5. Sync the queue's tally with the counter and update the HUD.
     const stepReps = queue.setReps(counter.reps);
     updateReps(stepReps);
 
-    // 7. Step finished? Advance to the next one (with a fresh counter).
+    // 6. Step finished? Advance to the next one (with a fresh counter).
     if (queue.isStepComplete()) {
       if (queue.isWorkoutComplete()) {
         // Whole workout done: THIS is the only normal way the alarm stops.
