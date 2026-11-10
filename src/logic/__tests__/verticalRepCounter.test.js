@@ -232,6 +232,21 @@ describe('createVerticalRepCounter', () => {
     expect(counter.reps).toBe(0);
   });
 
+  it('exposes the SAME numbers the FSM used, for the debug readout', () => {
+    const counter = makeCounter();
+    counter.update(200, 100, true); // baseline, excursion 0 on this frame
+    counter.update(230, 100, true); // excursion 0.3 -> down
+    expect(counter.phase).toBe('down');
+    expect(counter.lastExcursion).toBeCloseTo(0.3, 5);
+    expect(counter.baseline).toBeCloseTo(200);
+    const dbg = counter.debug;
+    expect(dbg.phase).toBe('down');
+    expect(dbg.lastExcursion).toBeCloseTo(0.3, 5);
+    expect(dbg.downFraction).toBe(0.2);
+    expect(dbg.upFraction).toBe(0.1);
+    expect(dbg.lastPostureOk).toBe(true);
+  });
+
   it('reset() clears reps and returns to the up phase', () => {
     const counter = makeCounter();
     counter.update(200, 100, true);
@@ -247,6 +262,134 @@ describe('createVerticalRepCounter', () => {
     counter.update(500, 100, true); // new baseline
     counter.update(530, 100, true); // down
     counter.update(505, 100, true); // up -> rep
+    expect(counter.reps).toBe(1);
+  });
+});
+
+// The posture guard reaches the counter as the 4th `postureOk` argument. These
+// tests prove the anti-standing guard actually blocks counting at the FSM.
+describe('createVerticalRepCounter anti-standing posture gate', () => {
+  it('a standing/walking BOB counts ZERO even when the excursion is big', () => {
+    // Simulate a standing bob: the body-relative dip DOES cross downFraction
+    // (0.2) over and over, but the upper-body posture guard says "not a
+    // push-up" (postureOk=false) every frame, so it NEVER enters 'down'.
+    const counter = makeCounter();
+    counter.update(200, 100, true, false); // baseline frame
+    for (let i = 0; i < 10; i += 1) {
+      counter.update(240, 100, true, false); // deep dip but posture rejects
+      counter.update(202, 100, true, false); // back up
+    }
+    expect(counter.phase).toBe('up');
+    expect(counter.reps).toBe(0);
+    expect(counter.debug.lastPostureOk).toBe(false);
+  });
+
+  it('this SAME bob pattern WOULD count if the posture guard were removed', () => {
+    // Control / "the test would fail if the guard were gone": the identical dip
+    // pattern with postureOk=true (the pre-guard behavior) counts reps. This is
+    // what proves the zero above is caused by the guard, not by the pattern.
+    const counter = makeCounter();
+    counter.update(200, 100, true, true);
+    for (let i = 0; i < 3; i += 1) {
+      counter.update(240, 100, true, true);
+      counter.update(202, 100, true, true);
+    }
+    expect(counter.reps).toBe(3);
+  });
+
+  it('a genuine push-up (guard passes) still counts normally', () => {
+    const counter = makeCounter();
+    counter.update(200, 100, true, true); // baseline
+    counter.update(230, 100, true, true); // down (posture ok)
+    counter.update(205, 100, true, true); // up -> rep
+    expect(counter.reps).toBe(1);
+  });
+
+  it('a guard flicker on the way UP does NOT strand an in-progress rep', () => {
+    // Entry into 'down' is gated, but completion is not — so a brief posture
+    // flicker as the user pushes back up cannot lose a legitimately-earned rep.
+    const counter = makeCounter();
+    counter.update(200, 100, true, true); // baseline
+    counter.update(235, 100, true, true); // enter down (guard ok)
+    expect(counter.phase).toBe('down');
+    counter.update(205, 100, true, false); // guard flickers false while rising
+    expect(counter.phase).toBe('up');
+    expect(counter.reps).toBe(1);
+  });
+
+  it('postureOk defaults to true, so pre-existing 3-arg callers are unchanged', () => {
+    // Every existing test calls update(y, scale, confident) with no 4th arg.
+    // That must behave exactly as before (counts a genuine dip).
+    const counter = makeCounter();
+    counter.update(200, 100, true);
+    counter.update(230, 100, true);
+    counter.update(205, 100, true);
+    expect(counter.reps).toBe(1);
+  });
+});
+
+// Prove the STABLE ruler fixes the "swinging ruler breaks counting" bug: once
+// the ruler is locked, a shoulder-width that swings frame-to-frame no longer
+// changes the excursion the counter measures, so a genuine rep still counts.
+describe('createVerticalRepCounter with a stable (locked) ruler', () => {
+  it('a genuine gesture counts the same whether the ruler is locked near or far', () => {
+    // Same fraction-pattern, two very different LOCKED body-scales. (This is the
+    // counter-side mirror of the body-scale normalization: a locked ruler is
+    // just a constant bodyScalePx, and the same gesture must agree.)
+    function runLocked(lockedScale, baseY) {
+      const counter = makeCounter();
+      const dipFrac = (f) => baseY + f * lockedScale;
+      counter.update(dipFrac(0), lockedScale, true, true); // baseline
+      counter.update(dipFrac(0.3), lockedScale, true, true); // down
+      counter.update(dipFrac(0.05), lockedScale, true, true); // up -> rep
+      counter.update(dipFrac(0.3), lockedScale, true, true); // down
+      counter.update(dipFrac(0.05), lockedScale, true, true); // up -> rep
+      return counter.reps;
+    }
+    expect(runLocked(60, 150)).toBe(2); // small body, far away
+    expect(runLocked(400, 900)).toBe(2); // large body, close up
+  });
+
+  it('a ruler that SWINGS frame-to-frame breaks counting, but a LOCKED one does not', () => {
+    // The real gesture: the upper body dips a fixed 18px below a 200 baseline
+    // and back. 18px is a solid dip against a true ~100px body-scale (0.18 >
+    // downFraction 0.2? no — choose 24px so 0.24 clears 0.2 cleanly).
+    const trueScale = 100;
+    const baseY = 200;
+    const downY = baseY + 24; // 24px dip = 0.24 of the TRUE scale -> clears 0.2
+    const upY = baseY + 4; // 0.04 of true scale -> clears upFraction 0.1
+
+    // A) SWINGING ruler (the bug): the front-facing shoulder width balloons on
+    // the down frame so 24px becomes a tiny fraction and the dip never crosses.
+    const swinging = makeCounter();
+    swinging.update(baseY, 100, true, true); // baseline, ruler 100
+    swinging.update(downY, 400, true, true); // ruler swung to 400 -> 24/400=0.06
+    swinging.update(upY, 100, true, true); // ruler back to 100
+    expect(swinging.reps).toBe(0); // the swing hid the real dip
+
+    // B) LOCKED ruler (the fix): the same pixel motion measured against a fixed
+    // 100px ruler crosses the threshold and counts.
+    const locked = makeCounter();
+    locked.update(baseY, trueScale, true, true); // baseline
+    locked.update(downY, trueScale, true, true); // 0.24 -> down
+    locked.update(upY, trueScale, true, true); // 0.04 -> up -> rep
+    expect(locked.reps).toBe(1);
+  });
+
+  it('a SIDE-VIEW style gradual dip still counts with posture ok', () => {
+    // Side view: nose+shoulder track together, posture guard passes each frame,
+    // and the dip is a gentle multi-frame ramp (regression guard for the
+    // upward-only baseline). Must count exactly one.
+    const counter = makeCounter();
+    counter.update(200, 100, true, true); // baseline
+    for (let y = 202; y <= 230; y += 2) {
+      counter.update(y, 100, true, true); // gentle descent, guard ok
+    }
+    expect(counter.phase).toBe('down');
+    for (let y = 228; y >= 205; y -= 2) {
+      counter.update(y, 100, true, true); // gentle rise
+    }
+    expect(counter.phase).toBe('up');
     expect(counter.reps).toBe(1);
   });
 });

@@ -92,10 +92,13 @@
  *                                         The FSM itself trusts the `confident`
  *                                         flag passed to update().
  * @returns {{
- *   update: (currentY:number, bodyScalePx:number, confident:boolean) => ('up'|'down'),
+ *   update: (currentY:number, bodyScalePx:number, confident:boolean, postureOk?:boolean) => ('up'|'down'),
  *   reset: () => void,
  *   get reps: () => number,
- *   get phase: () => ('up'|'down')
+ *   get phase: () => ('up'|'down'),
+ *   get lastExcursion: () => (number|null),
+ *   get baseline: () => (number|null),
+ *   get debug: () => object
  * }}
  */
 export function createVerticalRepCounter({
@@ -119,6 +122,13 @@ export function createVerticalRepCounter({
   let reps = 0;
   let baseline = null;
 
+  // DIAGNOSTICS: remember the most recent numbers the FSM actually used, so the
+  // on-screen debug readout (and the "click Begin -> leave a report" diagnostics
+  // in the UI) can show the SAME values the detector decided on. These are read
+  // via the getters below and never affect the counting logic.
+  let lastExcursion = null; // the normalized dip the last confident frame saw
+  let lastPostureOk = true; // whether the posture guard passed last frame
+
   return {
     // Expose the config in case the UI wants to show it. Not used by the FSM.
     minConfidence,
@@ -129,9 +139,17 @@ export function createVerticalRepCounter({
      * @param {number} currentY       The representative upper-body y (pixels).
      * @param {number} bodyScalePx    The body-scale ruler (pixels) for this frame.
      * @param {boolean} confident     Whether the needed joints were clearly visible.
+     * @param {boolean} [postureOk=true] Whether the upper-body ANTI-STANDING guard
+     *                                 passed (posture looks like a push-up, not
+     *                                 standing/walking). When false, a dip is NOT
+     *                                 allowed to ENTER the 'down' phase, so a
+     *                                 standing bob cannot start — let alone
+     *                                 complete — a rep. Defaults to true so every
+     *                                 existing caller/test (which never passed a
+     *                                 posture flag) behaves EXACTLY as before.
      * @returns {'up'|'down'} the phase after processing this reading.
      */
-    update(currentY, bodyScalePx, confident) {
+    update(currentY, bodyScalePx, confident, postureOk = true) {
       // ANTI-CHEAT GATE: ignore readings we cannot trust. The phase, rep count
       // and baseline are left exactly as they were.
       if (!confident) {
@@ -157,6 +175,9 @@ export function createVerticalRepCounter({
       // How far DOWN from the resting baseline are we, as a fraction of body
       // size? Positive = dipped toward the floor (because y grows downward).
       const excursion = (currentY - baseline) / bodyScalePx;
+      // Remember the numbers this frame used for the debug readout / report.
+      lastExcursion = excursion;
+      lastPostureOk = postureOk;
 
       if (phase === 'up') {
         // While resting, keep the baseline anchored to the most "up" position,
@@ -171,8 +192,17 @@ export function createVerticalRepCounter({
         // comment at the top). Now rep entry depends on how FAR you dip, not
         // how fast.
 
-        // Dipping past downFraction starts the rep.
-        if (excursion >= downFraction) {
+        // Dipping past downFraction starts the rep — BUT ONLY if the upper-body
+        // anti-standing guard says the posture looks like a push-up. This is
+        // the restored anti-cheat: a standing / walking bob can produce a big
+        // enough excursion to cross downFraction, yet it never ENTERS 'down'
+        // because postureOk is false, so it can never count. A genuine push-up
+        // passes the guard and proceeds exactly as before. Note we only gate
+        // ENTRY into 'down'; once legitimately down, a brief guard flicker on
+        // the way back up cannot strand the rep (completion still just needs the
+        // body to rise past upFraction), which keeps the slow/deep-dip behavior
+        // and the upward-only adaptive baseline fully intact.
+        if (excursion >= downFraction && postureOk) {
           phase = 'down';
         }
       } else {
@@ -194,6 +224,8 @@ export function createVerticalRepCounter({
       phase = 'up';
       reps = 0;
       baseline = null;
+      lastExcursion = null;
+      lastPostureOk = true;
     },
 
     /** Current number of completed reps. */
@@ -204,6 +236,38 @@ export function createVerticalRepCounter({
     /** Current phase: 'up' or 'down'. */
     get phase() {
       return phase;
+    },
+
+    /**
+     * The normalized dip (excursion) the LAST confident frame computed, or null
+     * if no usable frame has been seen yet. This is the SAME number the FSM
+     * compared against downFraction/upFraction, so the debug readout shows
+     * exactly what the detector decided on (not a recomputed guess).
+     */
+    get lastExcursion() {
+      return lastExcursion;
+    },
+
+    /** The current adaptive resting baseline y (pixels), or null if unset. */
+    get baseline() {
+      return baseline;
+    },
+
+    /**
+     * A plain snapshot of everything the debug readout / "click Begin -> leave a
+     * report" diagnostics want to show, all taken from the real FSM state so the
+     * numbers match what actually drove counting. Pure getter; no side effects.
+     */
+    get debug() {
+      return {
+        phase,
+        reps,
+        baseline,
+        lastExcursion,
+        lastPostureOk,
+        downFraction,
+        upFraction,
+      };
     },
   };
 }

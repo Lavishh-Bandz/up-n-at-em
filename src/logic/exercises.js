@@ -62,6 +62,7 @@
 //   side the camera can see more confidently (see pickBetterSide below).
 
 import { isBodyHorizontal } from './angles.js';
+import { DEFAULT_POSTURE_CONFIG } from './upperBodySignal.js';
 
 /**
  * PUSH-UP (position-based; see header)
@@ -95,6 +96,16 @@ export const EXERCISES = {
     // body-relative excursion + hysteresis + the 5s arming countdown are what
     // reject a standing bob now. See the header comment for the full rationale.
     orientation: 'any',
+    // ANTI-STANDING GUARD CONFIG (pure data, easy to find + tune live).
+    // These feed isPushupPosture / createPostureGuard in upperBodySignal.js.
+    // The guard uses ONLY upper-body keypoints (shoulders, nose, wrists) so it
+    // never re-requires the hip. See upperBodySignal.js for the full rationale
+    // and honest trade-offs. They are STARTING values meant to be nudged live
+    // via the debug readout.
+    postureGuard: {
+      ...DEFAULT_POSTURE_CONFIG,
+      wristStationaryFraction: 0.2,
+    },
     sides: {
       // Push-ups need only the chosen side's SHOULDER: it is both the vertical
       // signal and the anchor for the body-scale ruler. We deliberately do NOT
@@ -124,12 +135,24 @@ export const EXERCISES = {
       //   upFraction   = the smaller excursion you must rise back above to
       //                  complete the rep. Always upFraction < downFraction.
       // These are sensible STARTING POINTS; they are meant to be felt out live
-      // in a real browser and nudged to taste. Harder = a deeper required dip
-      // (bigger downFraction) and more reps; easier = a shallower dip.
-      easy: { downFraction: 0.25, upFraction: 0.1, defaultReps: 10 },
-      standard: { downFraction: 0.35, upFraction: 0.12, defaultReps: 20 },
+      // in a real browser and nudged to taste via the debug readout. Harder = a
+      // deeper required dip (bigger downFraction) and more reps; easier = a
+      // shallower dip.
+      //
+      // WHY THESE ARE LOWER THAN BEFORE (root-cause #3):
+      //   The old 0.25/0.35/0.45 downFractions assume the upper body visibly
+      //   travels a big fraction of a shoulder-width. From a low or front-ish
+      //   webcam angle the APPARENT vertical travel of the head+shoulders is
+      //   compressed (perspective), so a real, deep push-up produced an
+      //   excursion well under 0.25 and counted ZERO. We start the required dip
+      //   SHALLOWER so a genuine rep can actually reach it; the stable ruler +
+      //   the anti-standing guard are what keep a small standing bob from
+      //   crossing these. upFraction stays a comfortable margin BELOW
+      //   downFraction so the hysteresis band still swallows resting jitter.
+      easy: { downFraction: 0.12, upFraction: 0.05, defaultReps: 10 },
+      standard: { downFraction: 0.16, upFraction: 0.06, defaultReps: 20 },
       // Harder = deeper dip + more reps.
-      hard: { downFraction: 0.45, upFraction: 0.15, defaultReps: 45 },
+      hard: { downFraction: 0.22, upFraction: 0.08, defaultReps: 45 },
     },
   },
 

@@ -262,6 +262,31 @@ describe('push-up anti-cheat: upper-body requirements', () => {
     }
   });
 
+  it('carries anti-standing posture-guard config as pure data on the descriptor', () => {
+    // The guard config lives on the push-up descriptor so it is easy to find
+    // and tune live. It must use ONLY upper-body cues (no hip / lower-body key).
+    const guard = EXERCISES.pushup.postureGuard;
+    expect(guard).toBeTruthy();
+    expect(typeof guard.wristPlantedMargin).toBe('number');
+    expect(typeof guard.uprightNoseFraction).toBe('number');
+    expect(typeof guard.wristStationaryFraction).toBe('number');
+    expect(guard.uprightNoseFraction).toBeGreaterThan(0);
+    // Sit-ups do not carry a push-up posture guard.
+    expect(EXERCISES.situp.postureGuard).toBeUndefined();
+  });
+
+  it('uses reachable STARTING downFractions a genuine push-up can cross', () => {
+    // Root-cause #3: the old 0.25/0.35/0.45 were too deep for a compressed
+    // front/low webcam angle. Starting values must be shallower (but still a
+    // real dip), while keeping the hysteresis ordering.
+    for (const difficulty of DIFFICULTIES) {
+      const preset = getPreset('pushup', difficulty);
+      expect(preset.downFraction).toBeLessThanOrEqual(0.25);
+      expect(preset.downFraction).toBeGreaterThan(preset.upFraction);
+      expect(preset.upFraction).toBeGreaterThan(0);
+    }
+  });
+
   it('pickBetterSide + evaluateOrientation keep counting unblocked when the hip is out of frame', () => {
     // A frame with only the chosen shoulder visible (legs/hips out of frame).
     const frame = { right_shoulder: { x: 400, y: 200, score: 0.9 } };
