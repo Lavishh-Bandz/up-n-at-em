@@ -394,3 +394,65 @@
 .success-screen .start-button {
   max-width: 20rem;
 }
+
+/* ---- Debug readout ------------------------------------------------------ */
+/* A small, semi-transparent dev panel showing the EXACT numbers the push-up
+   detector used this frame, so the user can read them back to tune thresholds.
+   It mirrors the understated look of .camera-status (dark, rounded, small) and
+   is updated only a few times a second from throttled state, so it never
+   flickers or re-renders at frame rate. It sits in the corner and does not
+   obscure the skeleton overlay. */
+.debug-readout {
+  margin-top: 0.75rem;
+  padding: 0.5rem 0.75rem;
+  background: rgba(0, 0, 0, 0.6);
+  border-radius: 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.8rem;
+  line-height: 1.45;
+  text-align: left;
+  color: var(--text, #e2e8f0);
+}
+
+.debug-readout-title {
+  font-weight: 700;
+  margin-bottom: 0.25rem;
+  color: var(--accent);
+  letter-spacing: 0.03em;
+}
+
+.debug-line {
+  white-space: nowrap;
+}
+
+.debug-line strong {
+  color: var(--accent-2);
+}
+
+.debug-report {
+  margin-top: 0.4rem;
+}
+
+.debug-report-toggle {
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 6px;
+  color: inherit;
+  font: inherit;
+  padding: 0.2rem 0.5rem;
+  cursor: pointer;
+}
+
+.debug-report-text {
+  display: block;
+  width: 100%;
+  height: 10rem;
+  margin-top: 0.4rem;
+  background: rgba(0, 0, 0, 0.5);
+  color: inherit;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 6px;
+  font-family: inherit;
+  font-size: 0.72rem;
+  resize: vertical;
+}

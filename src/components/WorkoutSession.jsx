@@ -20,14 +20,21 @@ import { useEffect, useRef, useState } from 'react';
 import CameraView from './CameraView.jsx';
 import ProgressHud from './ProgressHud.jsx';
 import EmergencyExit from './EmergencyExit.jsx';
+import DebugReadout from './DebugReadout.jsx';
 import { createWorkoutQueue } from '../logic/workoutQueue.js';
 import { createRepCounter } from '../logic/repCounter.js';
 import { createVerticalRepCounter } from '../logic/verticalRepCounter.js';
-import { getPreset, pickBetterSide, evaluateOrientation } from '../logic/exercises.js';
+import { getPreset, getExercise, pickBetterSide, evaluateOrientation } from '../logic/exercises.js';
 import { angleBetween, allConfident, createAngleSmoother } from '../logic/angles.js';
-import { measureBodyScale, measureUpperBodyY } from '../logic/upperBodySignal.js';
+import {
+  measureBodyScale,
+  measureUpperBodyY,
+  createBodyScaleTracker,
+  createPostureGuard,
+} from '../logic/upperBodySignal.js';
 import { createPositionGate } from '../logic/positionGate.js';
 import { createStatusDebouncer } from '../logic/statusDebounce.js';
+import { createPushupDiagnostics } from '../logic/pushupDiagnostics.js';
 
 // How many recent angle readings we average together to calm down detector
 // jitter before the rep counter sees them. A small window keeps fast reps
@@ -42,6 +49,14 @@ const MIN_CONFIDENCE = 0.3;
 // the time only ticks down while you are actually in position (it pauses when
 // you are not), so a brief flicker barely moves it.
 const ARMING_HOLD_MS = 5000;
+
+// How often (ms) the on-screen DEBUG READOUT and the diagnostics report are
+// allowed to refresh. The pose handler runs every animation frame (~16ms), but
+// re-rendering a text panel that fast would flicker and waste work, so we only
+// push new debug state / record a report sample once this much time has passed
+// since the last one (a few times per second). This is what keeps the readout
+// steady and off the frame-rate re-render path.
+const DEBUG_THROTTLE_MS = 200;
 
 /**
  * Build a rep counter configured for a specific workout step.
@@ -114,6 +129,31 @@ export default function WorkoutSession({
   if (statusDebouncerRef.current === null) {
     statusDebouncerRef.current = createStatusDebouncer();
   }
+  // PUSH-UP ONLY: the STABLE body-scale ruler. We feed it the live body-scale
+  // each confident frame while the step is arming, then lock() it the moment
+  // the step arms, and reuse that locked value for the rest of the set so a
+  // front-facing shoulder width that swings through the rep cannot distort the
+  // excursion. Reset per step. (Sit-ups never touch this.)
+  const bodyScaleTrackerRef = useRef(null);
+  if (bodyScaleTrackerRef.current === null) {
+    bodyScaleTrackerRef.current = createBodyScaleTracker();
+  }
+  // PUSH-UP ONLY: the upper-body ANTI-STANDING guard. Its per-frame update()
+  // result is passed to the counter as postureOk so a standing / walking bob
+  // cannot enter the 'down' phase. Reset per step.
+  const postureGuardRef = useRef(null);
+  if (postureGuardRef.current === null) {
+    postureGuardRef.current = createPostureGuard(
+      getExercise('pushup').postureGuard
+    );
+  }
+  // PUSH-UP ONLY: the "click Begin -> leave a report" diagnostics recorder. It
+  // starts recording when a push-up step arms and is read back via the debug
+  // panel + logged to the console on Begin and on completion/exit. Pure data.
+  const diagnosticsRef = useRef(null);
+  if (diagnosticsRef.current === null) {
+    diagnosticsRef.current = createPushupDiagnostics();
+  }
 
   // React state mirrors just what the HUD needs to render.
   const [stepIndex, setStepIndex] = useState(0);
@@ -133,6 +173,12 @@ export default function WorkoutSession({
   // Is the countdown PAUSED mid-way (some time banked, but currently out of
   // position)? The HUD uses this to show a "get back into position" hint.
   const [countdownPaused, setCountdownPaused] = useState(false);
+  // The THROTTLED debug readout values (push-up steps only; null otherwise).
+  // Updated at most a few times a second (see DEBUG_THROTTLE_MS) so the panel
+  // never re-renders at frame rate. Holds the SAME numbers the detector used.
+  const [debugReadout, setDebugReadout] = useState(null);
+  // The THROTTLED diagnostics report snapshot shown in the expandable block.
+  const [debugReport, setDebugReport] = useState(null);
 
   // The pose handler runs every animation frame. To avoid re-rendering the HUD
   // at frame rate, we remember the last value we pushed into each piece of
@@ -142,6 +188,10 @@ export default function WorkoutSession({
   const lastArmedRef = useRef(false);
   const lastCountdownRef = useRef(Math.ceil(ARMING_HOLD_MS / 1000));
   const lastPausedRef = useRef(false);
+  // Timestamp (ms) of the last debug-state push. Used to THROTTLE the readout
+  // and the report sampling to DEBUG_THROTTLE_MS so they never re-render at
+  // frame rate. Starts at -Infinity so the very first frame updates.
+  const lastDebugAtRef = useRef(-Infinity);
 
   // Small helpers: only update state when the value is different from last time.
   // This mirrors the debounced "pose detected" value into the HUD, and only
@@ -178,6 +228,24 @@ export default function WorkoutSession({
       lastPausedRef.current = value;
       setCountdownPaused(value);
     }
+  }
+  // THROTTLED debug updater. Unlike the guards above (which compare values),
+  // the detector numbers change almost every frame, so instead of a value
+  // change-check we gate on ELAPSED TIME: we only push new debug state (and
+  // only record a report sample) once DEBUG_THROTTLE_MS has passed since the
+  // last one. Returns true when it actually fired, so the caller can also
+  // record a report sample on the same throttled beat. `nowMs` is the single
+  // timestamp already computed for this frame.
+  function maybeUpdateDebug(nowMs, readout, report) {
+    if (nowMs - lastDebugAtRef.current < DEBUG_THROTTLE_MS) {
+      return false;
+    }
+    lastDebugAtRef.current = nowMs;
+    setDebugReadout(readout);
+    if (report !== undefined) {
+      setDebugReport(report);
+    }
+    return true;
   }
 
   const currentStep = steps[stepIndex];
@@ -252,8 +320,45 @@ export default function WorkoutSession({
     //     if the user briefly leaves position. The per-rep orientation gate above
     //     already rejects bad reps, so there is no need to disarm. We only ever
     //     re-arm from scratch when a NEW step begins (see step advance below).
+    const wasArmed = lastArmedRef.current;
     const { armed: isArmed, heldMs, remainingSeconds } =
       positionGateRef.current.update(isConfident, nowMs);
+
+    // PUSH-UP ONLY: while the step is still arming, feed the STABLE ruler the
+    // live body-scale each CONFIDENT frame so it builds a steady baseline from
+    // the user holding the top position during the 5s countdown. We do this
+    // BEFORE the not-armed early-return so the ruler is ready to lock the
+    // instant the step arms. (This does not change the gate timing at all.)
+    if (step.exercise === 'pushup' && !isArmed && isConfident) {
+      const armingScale = measureBodyScale(keypoints);
+      if (armingScale != null) {
+        bodyScaleTrackerRef.current.push(armingScale, true);
+      }
+    }
+
+    // Detect the ARM transition (Begin / "GO!"). For push-ups this is where we
+    // LOCK the ruler and START the diagnostics report.
+    if (step.exercise === 'pushup' && isArmed && !wasArmed) {
+      bodyScaleTrackerRef.current.lock();
+      const preset = getPreset(step.exercise, step.difficulty);
+      diagnosticsRef.current.start(
+        {
+          exercise: step.exercise,
+          difficulty: step.difficulty,
+          targetReps: step.targetReps,
+          downFraction: preset.downFraction,
+          upFraction: preset.upFraction,
+          side,
+          bodyScalePx: bodyScaleTrackerRef.current.scale,
+          bodyScaleLocked: bodyScaleTrackerRef.current.locked,
+        },
+        nowMs
+      );
+      // Log the report on Begin so it is in the console as JSON from the start,
+      // even before any sample is recorded.
+      logReport('begin', diagnosticsRef.current.report);
+    }
+
     updateArmed(isArmed);
     if (!isArmed) {
       // Not armed yet: do not count reps. Drive the get-into-position countdown
@@ -284,13 +389,76 @@ export default function WorkoutSession({
     if (step.exercise === 'pushup') {
       // --- PUSH-UP: upper-body vertical movement ---
       const currentY = measureUpperBodyY(keypoints, side);
-      const bodyScalePx = measureBodyScale(keypoints);
+      // Use the LOCKED stable ruler captured during arming. If the lock failed
+      // (e.g. no confident frame during the hold), fall back to the live
+      // measurement for this frame so counting is not stranded.
+      const liveScale = measureBodyScale(keypoints);
+      const bodyScalePx = bodyScaleTrackerRef.current.locked
+        ? bodyScaleTrackerRef.current.scale
+        : liveScale;
       if (currentY == null || bodyScalePx == null) {
         updateDisplayConfident(statusDebouncerRef.current.update(false, nowMs));
         return;
       }
+      // ANTI-STANDING GUARD: does the posture look like a push-up (not a
+      // standing / walking bob)? This is passed to the counter as postureOk so
+      // a standing dip can never ENTER the 'down' phase. We use the same ruler
+      // the counter uses so the guard and the excursion agree.
+      const postureOk = postureGuardRef.current.update(
+        keypoints,
+        side,
+        bodyScalePx
+      );
       const smoothedY = smootherRef.current.push(currentY);
-      counter.update(smoothedY, bodyScalePx, isConfident);
+      counter.update(smoothedY, bodyScalePx, isConfident, postureOk);
+
+      // --- DEBUG READOUT + DIAGNOSTICS REPORT (throttled) ---
+      // Pull the SAME numbers the FSM just used from counter.debug, pair them
+      // with the ruler + posture result, and push them to the on-screen panel
+      // and the report AT MOST a few times a second. The raw (pre-smoothing)
+      // excursion is computed the same way the FSM computes the smoothed one,
+      // using the counter's own baseline, so "raw vs smoothed" is apples to
+      // apples. All of this is gated by maybeUpdateDebug's elapsed-time check,
+      // so it never re-renders the HUD/overlay at frame rate.
+      const dbg = counter.debug;
+      const rawExcursion =
+        dbg.baseline != null && bodyScalePx > 0
+          ? (currentY - dbg.baseline) / bodyScalePx
+          : null;
+      const readout = {
+        excursion: dbg.lastExcursion,
+        rawExcursion,
+        downFraction: dbg.downFraction,
+        upFraction: dbg.upFraction,
+        bodyScalePx,
+        bodyScaleLocked: bodyScaleTrackerRef.current.locked,
+        upperBodyY: currentY,
+        confident: isConfident,
+        armed: isArmed,
+        phase: dbg.phase,
+        postureOk,
+        reps: dbg.reps,
+      };
+      if (maybeUpdateDebug(nowMs, readout, diagnosticsRef.current.report)) {
+        // Record a report sample on the same throttled beat (plus the UI just
+        // read a fresh report snapshot above).
+        diagnosticsRef.current.sample(
+          {
+            excursion: dbg.lastExcursion,
+            downFraction: dbg.downFraction,
+            upFraction: dbg.upFraction,
+            bodyScalePx,
+            bodyScaleLocked: bodyScaleTrackerRef.current.locked,
+            upperBodyY: currentY,
+            confident: isConfident,
+            armed: isArmed,
+            phase: dbg.phase,
+            postureOk,
+            reps: dbg.reps,
+          },
+          nowMs
+        );
+      }
     } else {
       // --- SIT-UP: hip/torso angle (unchanged path) ---
       let angle = null;
@@ -317,11 +485,20 @@ export default function WorkoutSession({
     if (queue.isStepComplete()) {
       if (queue.isWorkoutComplete()) {
         // Whole workout done: THIS is the only normal way the alarm stops.
+        // Close out and log the diagnostics report (if a push-up set was being
+        // recorded) so the completed numbers are in the console as JSON.
+        diagnosticsRef.current.finish('completed', nowMs);
+        logReport('completed', diagnosticsRef.current.report);
+        setDebugReport(diagnosticsRef.current.report);
         alarm.stop();
         onComplete();
         return;
       }
       if (queue.advance()) {
+        // A push-up step just finished counting and we are moving on: close its
+        // report and log it before resetting for the next step.
+        diagnosticsRef.current.finish('step-complete', nowMs);
+        logReport('step-complete', diagnosticsRef.current.report);
         counterRef.current = makeCounterForStep(queue.current());
         smootherRef.current.reset(); // fresh smoothing for the new exercise
         // Re-arm from scratch: the next exercise needs a different start
@@ -329,6 +506,13 @@ export default function WorkoutSession({
         // must get into position again before counting resumes.
         positionGateRef.current.reset();
         statusDebouncerRef.current.reset(); // fresh optimistic warning state
+        // Fresh stable ruler, posture guard and diagnostics for the new step.
+        bodyScaleTrackerRef.current.reset();
+        postureGuardRef.current.reset();
+        diagnosticsRef.current.reset();
+        lastDebugAtRef.current = -Infinity;
+        setDebugReadout(null);
+        setDebugReport(null);
         updateArmed(false);
         // Fresh countdown for the new step: back to the full 5 and not paused.
         updateCountdownSeconds(Math.ceil(ARMING_HOLD_MS / 1000));
@@ -339,8 +523,31 @@ export default function WorkoutSession({
     }
   }
 
+  // Log the diagnostics report to the browser console as JSON. This is one of
+  // the two ways the user can hand the report back to us (the other is the
+  // on-screen expandable text block). Pure data; no disk or network. Wrapped so
+  // a console-less environment (tests/headless) never throws.
+  function logReport(reason, report) {
+    if (typeof console !== 'undefined' && console.log) {
+      // eslint-disable-next-line no-console
+      console.log(
+        `[UP N AT EM] push-up diagnostics (${reason}):`,
+        JSON.stringify(report)
+      );
+    }
+  }
+
   // ---- Emergency escape ----------------------------------------------------
   function handleEmergencyCancel() {
+    // Close out and log the diagnostics report so the numbers up to the exit
+    // are captured, then stop the alarm and leave (the alarm only ever stops on
+    // full completion or this emergency hold-to-exit).
+    const nowMs =
+      typeof performance !== 'undefined' && performance.now
+        ? performance.now()
+        : Date.now();
+    diagnosticsRef.current.finish('emergency-exit', nowMs);
+    logReport('emergency-exit', diagnosticsRef.current.report);
     alarm.stop();
     onEmergencyCancel();
   }
@@ -361,6 +568,8 @@ export default function WorkoutSession({
         countdownPaused={countdownPaused}
         alarmPlaying={alarm.playing}
       />
+
+      <DebugReadout debug={debugReadout} report={debugReport} />
 
       <EmergencyExit onCancel={handleEmergencyCancel} />
     </section>
