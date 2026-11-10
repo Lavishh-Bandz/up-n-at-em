@@ -155,10 +155,13 @@
   background: #000;
   border-radius: 14px;
   overflow: hidden;
-  /* We now request a wide 16:9 full-frame video (see CameraView.jsx), so the
-     box is 16:9 too. That way the whole frame fits with little or no black
-     letterbox bars, and there's room to see your WHOLE body in position. */
-  aspect-ratio: 16 / 9;
+  /* The box shape is set from the camera's REAL frame size in CameraView.jsx
+     (an inline aspect-ratio once we know videoWidth/videoHeight). That way the
+     box is exactly the shape of the picture, so nothing gets cropped and there
+     are no black bars. Until we know the real size we fall back to this 4:3
+     default, which is the most common plain-webcam shape (so the first instant
+     before metadata loads looks sensible rather than stretched). */
+  aspect-ratio: 4 / 3;
 }
 
 .camera-video,
@@ -167,11 +170,12 @@
   inset: 0;
   width: 100%;
   height: 100%;
-  /* `contain` shows the FULL camera frame (letterboxed if needed) instead of
-     cropping its edges off to fill the box. Cropping (`cover`) could hide your
-     arms/legs, which defeats the point. The video and the canvas overlay use
-     the SAME object-fit and the SAME box, so the skeleton dots stay lined up
-     with your body. */
+  /* `contain` shows the FULL camera frame instead of cropping its edges off to
+     fill the box. Because we size the box to the camera's own shape (above),
+     `contain` doesn't letterbox in practice — it just guarantees we never crop.
+     Cropping (`cover`) could hide your arms/legs, which defeats the point. The
+     video and the canvas overlay use the SAME object-fit and the SAME box, so
+     the skeleton dots stay lined up with your body. */
   object-fit: contain;
 }
 
@@ -189,6 +193,12 @@
   background: rgba(0, 0, 0, 0.6);
   border-radius: 8px;
   font-size: 0.85rem;
+}
+
+/* The pose-detector status line sits just ABOVE the camera-size readout so the
+   two little corner labels don't overlap each other. */
+.camera-status-model {
+  bottom: 2.75rem;
 }
 
 .camera-status-error {

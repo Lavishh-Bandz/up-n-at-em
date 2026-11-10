@@ -51,20 +51,30 @@ const MOVENET_KEYPOINT_NAMES = [
   'left_knee', 'right_knee', 'left_ankle', 'right_ankle',
 ];
 
-// The camera settings we'd LIKE: a full-frame 1080p landscape view from a
-// front-facing camera. Every value is `ideal` (a wish, not a demand) so a
-// camera that can't match it exactly still returns its closest mode rather
-// than failing. A wider/higher-resolution mode usually means less crop, which
-// is the whole point here (see getCameraStream below).
+// The camera settings we'd LIKE: a high-resolution frame from a front-facing
+// camera. Every value is `ideal` (a wish, not a demand) so a camera that can't
+// match it exactly still returns its closest mode rather than failing.
+//
+// IMPORTANT LESSON (why there is NO aspectRatio here anymore):
+//   An earlier version asked for aspectRatio { ideal: 16/9 }. That BACKFIRED on
+//   a plain external USB webcam. Most simple webcams have a 4:3 sensor (like
+//   640×480 or 1280×960). When you demand a 16:9 picture from a 4:3 sensor, the
+//   camera can only obey by CROPPING OFF the top and bottom of its real view —
+//   so you get a zoomed-in 16:9 slice, NOT the full wide picture. That made the
+//   app look MORE zoomed than the camera's true field of view.
+//   The fix: do NOT force an aspect ratio. We ask only for a resolution and let
+//   the camera hand back its OWN natural shape (its full, uncropped frame). We
+//   then size the on-screen box to match whatever shape it gives us.
 const WIDE_VIDEO_CONSTRAINTS = {
   width: { ideal: 1920 },
   height: { ideal: 1080 },
-  aspectRatio: { ideal: 16 / 9 },
-  facingMode: 'user',
+  // `ideal`, not a plain string, so a front camera is only a PREFERENCE — a
+  // single external USB camera is still accepted when there's no choice.
+  facingMode: { ideal: 'user' },
 };
 
-// Ask for the camera with our wide full-frame constraints, but don't let a
-// fussy camera lock us out: if the detailed request fails for a reason that
+// Ask for the camera with our wide (but un-cropped) constraints, but don't let
+// a fussy camera lock us out: if the detailed request fails for a reason that
 // ISN'T "permission denied" or "no camera" (for example an OverconstrainedError
 // because the webcam dislikes those exact numbers), we quietly retry once with
 // the simple { video: true } request so the app still works. Permission and
@@ -105,6 +115,15 @@ export default function CameraView({ active, onPose }) {
   // Camera permission / hardware errors we want to show the user clearly.
   const [cameraError, setCameraError] = useState(null);
 
+  // The REAL frame size the camera actually gave us, filled in once the video
+  // reports its metadata. We use it for two things:
+  //   1) a tiny on-screen readout ("Camera: 640×480") so we can SEE the true
+  //      capture size instead of guessing whether it "looks zoomed", and
+  //   2) the on-screen box's shape, so the container matches the camera's own
+  //      aspect ratio (no forced crop, no awkward letterbox).
+  // `null` until we know; the readout and the custom box shape wait for it.
+  const [cameraDimensions, setCameraDimensions] = useState(null);
+
   // Run pose detection against the video while the session is active.
   const { status, error: detectorError, keypoints } = usePoseDetector(videoRef, {
     enabled: active,
@@ -122,18 +141,15 @@ export default function CameraView({ active, onPose }) {
         return;
       }
       try {
-        // We ask for the WIDEST sensible full-frame view instead of a bare
-        // { video: true }. On many webcams a bare request hands back a
-        // cropped/zoomed default mode (a narrow field of view), which cuts off
-        // your arms and legs so the app can't see your whole body in push-up
-        // position. Asking for a high resolution (full 1080p) at a landscape
-        // 16:9 aspect ratio generally makes the camera give us its WIDER,
-        // less-cropped mode, so there's room for your whole body with margin.
+        // We ask for a high resolution but DON'T force an aspect ratio (see
+        // WIDE_VIDEO_CONSTRAINTS above). Asking for a big resolution nudges the
+        // camera toward its fuller, less-cropped mode so there's room to see
+        // your whole body — but because we no longer demand 16:9, a 4:3 webcam
+        // returns its WHOLE 4:3 picture instead of a cropped 16:9 slice of it.
         //
         // Everything uses `ideal` (not `exact`) on purpose: `ideal` is a
         // preference, so a camera that can't hit these exact numbers still
-        // returns its closest mode instead of throwing an error. facingMode
-        // 'user' prefers a front-facing camera when there's a choice.
+        // returns its closest mode instead of throwing an error.
         const stream = await getCameraStream();
         if (cancelled) {
           // We unmounted while waiting for permission; stop the stream.
@@ -142,8 +158,37 @@ export default function CameraView({ active, onPose }) {
         }
         streamRef.current = stream;
         if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-          await videoRef.current.play().catch(() => {});
+          const video = videoRef.current;
+          video.srcObject = stream;
+
+          // Once the browser knows the real frame size, record it. We prefer
+          // the <video> element's own videoWidth/videoHeight (the exact pixels
+          // being decoded), and fall back to the track's reported settings if
+          // the video numbers aren't ready yet. This is the honest capture
+          // size — the same shape we'll make the on-screen box so nothing is
+          // cropped and the skeleton overlay stays lined up with the body.
+          const recordDimensions = () => {
+            if (cancelled) return;
+            let width = video.videoWidth;
+            let height = video.videoHeight;
+            if (!width || !height) {
+              // Fall back to what the camera TRACK reports it's sending.
+              const track = stream.getVideoTracks()[0];
+              const settings = track ? track.getSettings() : {};
+              width = settings.width || width;
+              height = settings.height || height;
+            }
+            if (width && height) {
+              setCameraDimensions({ width, height });
+            }
+          };
+          // `loadedmetadata` fires as soon as width/height are known.
+          video.addEventListener('loadedmetadata', recordDimensions);
+
+          await video.play().catch(() => {});
+          // In case metadata was already available before we attached the
+          // listener (fast cameras), read it once right now too.
+          recordDimensions();
         }
       } catch (err) {
         // Translate the browser's error into a friendly message.
@@ -224,18 +269,36 @@ export default function CameraView({ active, onPose }) {
     );
   }
 
+  // Shape the on-screen box to match the camera's REAL frame once we know it.
+  // Before that we leave it to the CSS default. Setting the container's
+  // aspect-ratio to the true width/height means the box is exactly the shape of
+  // the picture, so `object-fit: contain` shows the WHOLE frame with no crop
+  // and (because the shapes match) no black letterbox bars either. The canvas
+  // overlay shares the same box and the same fit, so the skeleton stays aligned.
+  const boxStyle = cameraDimensions
+    ? { aspectRatio: `${cameraDimensions.width} / ${cameraDimensions.height}` }
+    : undefined;
+
   return (
-    <div className="camera-view">
+    <div className="camera-view" style={boxStyle}>
       {/* The video and canvas are stacked; CSS positions the canvas on top. */}
       <video ref={videoRef} className="camera-video" playsInline muted />
       <canvas ref={canvasRef} className="camera-overlay" />
 
+      {/* Tiny readout of the REAL capture size, so "it looks zoomed" becomes a
+          concrete number we can tune against. Shown as soon as we know it. */}
+      {cameraDimensions && (
+        <p className="camera-status">
+          Camera: {cameraDimensions.width}×{cameraDimensions.height}
+        </p>
+      )}
+
       {/* Small status line so the user knows the model is warming up. */}
       {status === 'loading' && (
-        <p className="camera-status">Loading pose detector…</p>
+        <p className="camera-status camera-status-model">Loading pose detector…</p>
       )}
       {status === 'error' && (
-        <p className="camera-status camera-status-error">
+        <p className="camera-status camera-status-model camera-status-error">
           Pose detector failed to load
           {detectorError ? `: ${detectorError.message}` : '.'}
         </p>
