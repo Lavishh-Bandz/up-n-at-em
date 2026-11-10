@@ -48,24 +48,34 @@
 //   The "top" of a push-up is not a fixed pixel row — it drifts as the user
 //   shifts, and we do not know it up front. So:
 //     - The FIRST confident 'up' frame simply sets the baseline to currentY.
-//     - After that, while we are in the 'up' phase, we EASE the baseline toward
-//       the most "up" (smallest y) resting position we see: if currentY is
-//       higher up than the baseline (smaller y) we snap the baseline to it, and
-//       if it is a little lower we drift the baseline gently toward it. This
-//       lets the resting point re-anchor over time without a brief dip
-//       dragging it down.
+//     - After that, while we are in the 'up' phase, the baseline only ever
+//       re-anchors UPWARD: if currentY is higher up than the baseline (a
+//       SMALLER y) we snap the baseline to it. If currentY is LOWER (a bigger
+//       y, i.e. the body is starting to dip toward the floor) we LEAVE the
+//       baseline where it is. We deliberately do NOT ease the baseline down.
 //     - Once a rep completes we go back to 'up', so the baseline naturally
 //       re-anchors to the new resting position on the following up frames.
+//
+//   WHY WE DON'T EASE THE BASELINE DOWNWARD (this matters a lot):
+//     An earlier version eased the baseline gently DOWN toward a lower reading
+//     while still in the 'up' phase. That sounds harmless, but it meant the
+//     baseline chased the shoulder DOWN during a descent, so the excursion the
+//     FSM measures could never keep up with a SLOW or heavily-smoothed dip. The
+//     result was the exact failure this redesign exists to prevent: a genuine,
+//     deep-enough push-up performed gently/smoothly would count ZERO reps while
+//     the same dip done as one sharp jump counted one. Rep ENTRY would depend
+//     on how FAST you moved instead of how FAR you dipped.
+//     By re-anchoring only upward, the baseline still follows a real new
+//     RESTING position (you can only rest HIGHER-up, which is a smaller y, and
+//     it re-anchors again the moment a rep completes), but it never drifts down
+//     into a descent — so how far you dip is all that decides a rep. A standing
+//     bob is still rejected because a small nod stays a tiny fraction of
+//     body-scale and never reaches downFraction.
 //
 // ANTI-CHEAT:
 //   update(currentY, bodyScalePx, confident) takes a `confident` flag. If the
 //   needed upper-body keypoints are not clearly visible (confident === false),
 //   we DO NOT advance the state machine at all — exactly like repCounter.js.
-
-// How gently the baseline drifts DOWN toward a slightly-lower resting position
-// while in the 'up' phase (0 = never drift, 1 = snap instantly). A small value
-// keeps the resting point steady while still letting it re-anchor over time.
-const BASELINE_EASE = 0.1;
 
 /**
  * Create an upper-body vertical-movement rep counter.
@@ -149,15 +159,17 @@ export function createVerticalRepCounter({
       const excursion = (currentY - baseline) / bodyScalePx;
 
       if (phase === 'up') {
-        // While resting, keep the baseline anchored to the most "up" position.
+        // While resting, keep the baseline anchored to the most "up" position,
+        // but ONLY ever re-anchor UPWARD (toward a smaller y).
         if (currentY < baseline) {
           // Higher up than before (smaller y): snap the resting point up.
           baseline = currentY;
-        } else {
-          // A little lower: drift gently toward it so the baseline can
-          // re-anchor over time without a brief dip dragging it down.
-          baseline += (currentY - baseline) * BASELINE_EASE;
         }
+        // If currentY is LOWER (bigger y) we leave the baseline alone. We do
+        // NOT ease it down: easing down would chase the shoulder during a
+        // descent and make a slow/smooth real dip count zero (see the big
+        // comment at the top). Now rep entry depends on how FAR you dip, not
+        // how fast.
 
         // Dipping past downFraction starts the rep.
         if (excursion >= downFraction) {

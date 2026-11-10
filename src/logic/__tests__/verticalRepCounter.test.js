@@ -88,6 +88,76 @@ describe('createVerticalRepCounter', () => {
     expect(repsFar).toBe(repsNear);
   });
 
+  it('counts a GRADUAL (slow/smooth) deep dip as exactly one rep', () => {
+    // REGRESSION GUARD for the baseline-drift bug. A genuine, deep-enough
+    // push-up performed GENTLY must still count, because rep entry depends on
+    // how FAR you dip, not how FAST. We ramp the signal down frame-by-frame at
+    // a realistic (post-smoothing) rate rather than jumping it in one frame.
+    //
+    // With bodyScalePx = 100 and downFraction 0.2 (= 20px), we descend only
+    // ~2px per frame. Under the OLD "ease the baseline down at 0.1/frame"
+    // behavior the measured excursion would plateau around 0.02 * 10 = 0.2 and
+    // flicker right at the threshold / never cleanly clear it; the dip below
+    // was deliberately set well past that cap so this test FAILS against the
+    // old easing and PASSES with the fix (baseline only re-anchors upward).
+    const counter = makeCounter();
+
+    counter.update(200, 100, true); // learn baseline at y = 200
+
+    // Descend gently from 200 to 240 (a 40px / 0.40-of-scale dip) over 20
+    // frames = ~2px per frame. Comfortably past downFraction (0.2) in total.
+    for (let y = 202; y <= 240; y += 2) {
+      counter.update(y, 100, true);
+    }
+    expect(counter.phase).toBe('down'); // the gentle dip DID reach 'down'
+
+    // Rise gently back up to 205 (excursion 0.05 <= upFraction 0.1) -> one rep.
+    for (let y = 238; y >= 205; y -= 2) {
+      counter.update(y, 100, true);
+    }
+    expect(counter.phase).toBe('up');
+    expect(counter.reps).toBe(1);
+  });
+
+  it('counts the SAME GRADUAL gesture the same at very different body-scales', () => {
+    // Like the near/far test above, but each dip is a multi-frame RAMP instead
+    // of a single jump, so the body-scale normalization is proven on the exact
+    // frame-by-frame path the real pipeline (and the old baseline bug) lives
+    // on. The same fraction-ramp at tiny vs huge bodyScalePx must agree.
+    function runGradualAtScale(bodyScalePx, baseY) {
+      const counter = createVerticalRepCounter({
+        downFraction: 0.2,
+        upFraction: 0.1,
+      });
+
+      const dipTo = (targetFrac) => {
+        // Ramp from the current reading toward baseY + targetFrac*scale in
+        // small ~0.02-of-scale steps (a realistic gentle rate).
+        const targetY = baseY + targetFrac * bodyScalePx;
+        const step = bodyScalePx * 0.02;
+        // Walk from the resting-ish top down to the target, then back up.
+        for (let y = baseY; y <= targetY; y += step) {
+          counter.update(y, bodyScalePx, true);
+        }
+        for (let y = targetY; y >= baseY + 0.05 * bodyScalePx; y -= step) {
+          counter.update(y, bodyScalePx, true);
+        }
+      };
+
+      counter.update(baseY, bodyScalePx, true); // learn baseline
+      dipTo(0.3); // one full gentle down->up (0.30 past, release to 0.05)
+      dipTo(0.3); // a second one
+      return counter.reps;
+    }
+
+    const repsFar = runGradualAtScale(60, 150); // small body, far away
+    const repsNear = runGradualAtScale(400, 900); // large body, close up
+
+    expect(repsFar).toBe(2);
+    expect(repsNear).toBe(2);
+    expect(repsFar).toBe(repsNear);
+  });
+
   it('does NOT count jitter that stays inside the hysteresis band', () => {
     const counter = makeCounter();
     counter.update(200, 100, true); // baseline
