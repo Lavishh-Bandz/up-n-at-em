@@ -51,6 +51,47 @@ const MOVENET_KEYPOINT_NAMES = [
   'left_knee', 'right_knee', 'left_ankle', 'right_ankle',
 ];
 
+// The camera settings we'd LIKE: a full-frame 1080p landscape view from a
+// front-facing camera. Every value is `ideal` (a wish, not a demand) so a
+// camera that can't match it exactly still returns its closest mode rather
+// than failing. A wider/higher-resolution mode usually means less crop, which
+// is the whole point here (see getCameraStream below).
+const WIDE_VIDEO_CONSTRAINTS = {
+  width: { ideal: 1920 },
+  height: { ideal: 1080 },
+  aspectRatio: { ideal: 16 / 9 },
+  facingMode: 'user',
+};
+
+// Ask for the camera with our wide full-frame constraints, but don't let a
+// fussy camera lock us out: if the detailed request fails for a reason that
+// ISN'T "permission denied" or "no camera" (for example an OverconstrainedError
+// because the webcam dislikes those exact numbers), we quietly retry once with
+// the simple { video: true } request so the app still works. Permission and
+// not-found errors are re-thrown so the caller can show its friendly message.
+async function getCameraStream() {
+  try {
+    return await navigator.mediaDevices.getUserMedia({
+      video: WIDE_VIDEO_CONSTRAINTS,
+    });
+  } catch (err) {
+    const name = err && err.name;
+    // These are real "the user/hardware said no" errors. Don't paper over them
+    // with a fallback; let the caller translate them into a friendly message.
+    if (
+      name === 'NotAllowedError' ||
+      name === 'SecurityError' ||
+      name === 'NotFoundError'
+    ) {
+      throw err;
+    }
+    // Otherwise the camera just didn't like our detailed constraints. Fall back
+    // to the plain request so we still get a stream (even if it's the narrower
+    // default mode) rather than failing outright.
+    return navigator.mediaDevices.getUserMedia({ video: true });
+  }
+}
+
 /**
  * @param {object} props
  * @param {boolean} props.active        Whether a session is running (drives detection).
@@ -81,7 +122,19 @@ export default function CameraView({ active, onPose }) {
         return;
       }
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+        // We ask for the WIDEST sensible full-frame view instead of a bare
+        // { video: true }. On many webcams a bare request hands back a
+        // cropped/zoomed default mode (a narrow field of view), which cuts off
+        // your arms and legs so the app can't see your whole body in push-up
+        // position. Asking for a high resolution (full 1080p) at a landscape
+        // 16:9 aspect ratio generally makes the camera give us its WIDER,
+        // less-cropped mode, so there's room for your whole body with margin.
+        //
+        // Everything uses `ideal` (not `exact`) on purpose: `ideal` is a
+        // preference, so a camera that can't hit these exact numbers still
+        // returns its closest mode instead of throwing an error. facingMode
+        // 'user' prefers a front-facing camera when there's a choice.
+        const stream = await getCameraStream();
         if (cancelled) {
           // We unmounted while waiting for permission; stop the stream.
           stream.getTracks().forEach((t) => t.stop());

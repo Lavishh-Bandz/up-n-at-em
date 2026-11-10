@@ -36,6 +36,8 @@ npm run dev     # starts a local dev server
 
 Then open the URL it prints (usually **http://localhost:5173**) in your browser. Your browser will ask for permission to use the camera: say yes, otherwise the app has nothing to watch.
 
+> **Camera framing:** the app asks the camera for the widest sensible full-frame view (full 1080p at a 16:9 landscape aspect ratio) so your whole body fits with room to spare, instead of whatever narrow/zoomed default the camera might otherwise hand back. It asks politely (an "ideal" preference, not a hard demand), and if a particular camera doesn't like those settings it quietly falls back to a plain request so the app still works. The feed is shown un-cropped (letterboxed with small black bars if needed) so none of your body gets cut off at the edges. If the view still looks too zoomed in after this, the remaining cause is usually a *hardware/driver* zoom or field-of-view setting in your camera's own utility (for a Logitech webcam, its Logi/Logitech camera app; on Windows, the Camera app's settings) — that lives outside the browser, so you'd adjust it there.
+
 > **First run needs internet.** The pose-detection model (the thing that finds your body) downloads its "brain" from the web the first time the page loads. After that it's cached.
 
 Other commands you might use:

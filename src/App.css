@@ -155,7 +155,10 @@
   background: #000;
   border-radius: 14px;
   overflow: hidden;
-  aspect-ratio: 4 / 3;
+  /* We now request a wide 16:9 full-frame video (see CameraView.jsx), so the
+     box is 16:9 too. That way the whole frame fits with little or no black
+     letterbox bars, and there's room to see your WHOLE body in position. */
+  aspect-ratio: 16 / 9;
 }
 
 .camera-video,
@@ -164,7 +167,12 @@
   inset: 0;
   width: 100%;
   height: 100%;
-  object-fit: cover;
+  /* `contain` shows the FULL camera frame (letterboxed if needed) instead of
+     cropping its edges off to fill the box. Cropping (`cover`) could hide your
+     arms/legs, which defeats the point. The video and the canvas overlay use
+     the SAME object-fit and the SAME box, so the skeleton dots stay lined up
+     with your body. */
+  object-fit: contain;
 }
 
 .camera-overlay {
