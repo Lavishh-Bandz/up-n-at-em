@@ -4,10 +4,24 @@
 //
 // This is pure data + small pure helpers. No React, no DOM. It tells the rest
 // of the app:
-//   - which three joints form the angle we track for each exercise
+//   - which joints we track for each exercise (an angle for sit-ups, an
+//     upper-body vertical POSITION for push-ups)
 //   - which joints MUST be visible for a pose to count (anti-cheat)
-//   - what the "down" and "up" angle thresholds are at each difficulty
+//   - what the "down" and "up" thresholds are at each difficulty
 //   - a sensible default number of reps per difficulty
+//
+// TWO DIFFERENT DETECTION STYLES (read this first):
+//   SIT-UPS are counted from a JOINT ANGLE (shoulder->hip->knee) using the
+//   angle-based createRepCounter. Nothing about sit-ups changed.
+//
+//   PUSH-UPS are counted from the VISIBLE UPPER BODY moving DOWN toward the
+//   floor and back UP (Solution 1), using the position-based
+//   createVerticalRepCounter. We switched because a normal webcam physically
+//   cannot fit a whole body doing a floor push-up, so the old full-body
+//   side-profile elbow angle (which needed the elbow, wrist AND hip in frame)
+//   left real users counting zero. The upper-body approach only needs the
+//   shoulders (and optionally the nose), so it keeps counting even when the
+//   legs/hips are out of frame.
 //
 // BODY ORIENTATION (anti-cheat, part 2):
 //   Counting a rep from a joint angle alone is not enough. Standing up and just
@@ -19,6 +33,19 @@
 //     'any'        = we do not gate on orientation for this exercise.
 //   The check compares the tilt of your shoulder->hip line using the pure
 //   isBodyHorizontal helper from angles.js (see evaluateOrientation below).
+//
+//   PUSH-UPS now use 'any' on purpose. The old 'horizontal' gate measured the
+//   shoulder->hip tilt, but the hip is exactly the keypoint that drops out of
+//   frame on a webcam, so keeping it would re-break counting for the users we
+//   are trying to help. Instead, a standing "bob" is rejected by the detection
+//   itself: the vertical excursion is measured as a FRACTION of the user's own
+//   body-scale, so a small standing nod is a tiny fraction while a real floor
+//   push-up is a large one, and the two-threshold hysteresis plus the 5-second
+//   get-into-position arming countdown keep casual wobble from counting.
+//   HONEST TRADE-OFF: position-based detection is a little less precise than a
+//   clean side-profile elbow angle, but it is the only approach that actually
+//   works within a webcam's field of view; the smoothing + hysteresis + arming
+//   countdown are what make it trustworthy in practice.
 //
 // JOINT NAMES come from MoveNet, the pose-detection model we use. MoveNet names
 // its 17 keypoints like: 'left_shoulder', 'left_elbow', 'left_wrist',
@@ -37,48 +64,72 @@
 import { isBodyHorizontal } from './angles.js';
 
 /**
- * PUSH-UP
- *   Tracked angle: the ELBOW angle (shoulder -> elbow -> wrist).
- *     top of a push-up    = arm straight  = large angle (~170)
- *     bottom of a push-up = elbow bent    = small angle (~90)
+ * PUSH-UP (position-based; see header)
+ *   Tracked signal: the VISIBLE UPPER BODY's vertical position (the chosen
+ *   side's shoulder, averaged with the nose when it is visible). A rep is a
+ *   DOWN-then-UP excursion measured as a fraction of the user's body-scale.
+ *     top of a push-up    = upper body high  = small y
+ *     bottom of a push-up = upper body low   = large y (y grows downward)
+ *   Only the SHOULDER(S) are required — no elbow, wrist or hip — so counting
+ *   survives the legs/hips being out of a webcam's frame.
  *
- * SIT-UP
+ * SIT-UP (angle-based; unchanged)
  *   Tracked angle: the HIP / torso angle (shoulder -> hip -> knee).
  *     lying down flat = torso open   = large angle (~150+)
  *     sitting up      = torso folded = small angle (~80)
  *
- * For each exercise and each SIDE, `angleJoints` is [outerA, vertex, outerC] in
- * the order angleBetween() expects, and `requiredKeypoints` lists every joint
- * that must be confidently visible on that side for the rep to count. The two
- * sides live under `sides.left` and `sides.right`.
+ * For sit-ups, each SIDE's `angleJoints` is [outerA, vertex, outerC] in the
+ * order angleBetween() expects. For push-ups there is no angle, so `angleJoints`
+ * is null (the vertical path never reads it) and `signalJoints` names the single
+ * shoulder whose y we track on that side. `requiredKeypoints` always lists every
+ * joint that must be confidently visible on that side for the rep to count. The
+ * two sides live under `sides.left` and `sides.right`.
  */
 export const EXERCISES = {
   pushup: {
     id: 'pushup',
     label: 'Push-ups',
-    // A push-up only counts when your body is roughly horizontal (you are down
-    // in push-up/plank position). This is what stops "standing and bending your
-    // arms" from being counted as reps.
-    orientation: 'horizontal',
+    // 'any' on purpose: push-ups are counted from upper-body vertical movement,
+    // not the shoulder->hip tilt, so we must NOT gate on an orientation that
+    // needs the hip (the hip is what falls out of frame on a webcam). The
+    // body-relative excursion + hysteresis + the 5s arming countdown are what
+    // reject a standing bob now. See the header comment for the full rationale.
+    orientation: 'any',
     sides: {
-      // Elbow angle: shoulder -> elbow (vertex) -> wrist.
-      // All three are needed to measure the elbow; without them we cannot trust
-      // a rep, so they double as the anti-cheat "required pose" for that side.
+      // Push-ups need only the chosen side's SHOULDER: it is both the vertical
+      // signal and the anchor for the body-scale ruler. We deliberately do NOT
+      // require the elbow, wrist or hip anymore, because those are the joints a
+      // webcam cannot fit during a real floor push-up. pickBetterSide therefore
+      // now chooses the better-visible SHOULDER side. `angleJoints` is null —
+      // the vertical counter ignores it — and `signalJoints` names the shoulder
+      // whose y we track. (The body-scale helper still uses BOTH shoulders when
+      // they are both visible, falling back to nose-to-shoulder; that happens in
+      // upperBodySignal.js and does not need to be a per-side "required" joint.)
       left: {
-        angleJoints: ['left_shoulder', 'left_elbow', 'left_wrist'],
-        requiredKeypoints: ['left_shoulder', 'left_elbow', 'left_wrist'],
+        angleJoints: null,
+        signalJoints: ['left_shoulder'],
+        requiredKeypoints: ['left_shoulder'],
       },
       right: {
-        angleJoints: ['right_shoulder', 'right_elbow', 'right_wrist'],
-        requiredKeypoints: ['right_shoulder', 'right_elbow', 'right_wrist'],
+        angleJoints: null,
+        signalJoints: ['right_shoulder'],
+        requiredKeypoints: ['right_shoulder'],
       },
     },
     difficulties: {
-      // Easier = shallower range of motion (less bend required) and fewer reps.
-      easy: { downAngle: 100, upAngle: 150, defaultReps: 10 },
-      standard: { downAngle: 90, upAngle: 160, defaultReps: 20 },
-      // Harder = stricter angles (deeper bend + straighter lockout) + more reps.
-      hard: { downAngle: 80, upAngle: 170, defaultReps: 45 },
+      // Push-up presets are BODY-SCALE FRACTIONS consumed by
+      // createVerticalRepCounter, NOT angles:
+      //   downFraction = how far the upper body must dip DOWN (as a fraction of
+      //                  shoulder-width in pixels) to reach the bottom.
+      //   upFraction   = the smaller excursion you must rise back above to
+      //                  complete the rep. Always upFraction < downFraction.
+      // These are sensible STARTING POINTS; they are meant to be felt out live
+      // in a real browser and nudged to taste. Harder = a deeper required dip
+      // (bigger downFraction) and more reps; easier = a shallower dip.
+      easy: { downFraction: 0.25, upFraction: 0.1, defaultReps: 10 },
+      standard: { downFraction: 0.35, upFraction: 0.12, defaultReps: 20 },
+      // Harder = deeper dip + more reps.
+      hard: { downFraction: 0.45, upFraction: 0.15, defaultReps: 45 },
     },
   },
 
@@ -129,13 +180,18 @@ export function getExercise(exerciseId) {
 }
 
 /**
- * Get the threshold preset ({ downAngle, upAngle, defaultReps }) for an
- * exercise at a given difficulty. These values are meant to be fed straight
- * into createRepCounter().
+ * Get the difficulty preset for an exercise. The SHAPE depends on the exercise,
+ * because the two exercises are counted in different ways:
+ *   - sit-ups return { downAngle, upAngle, defaultReps } (fed to createRepCounter)
+ *   - push-ups return { downFraction, upFraction, defaultReps } (fed to
+ *     createVerticalRepCounter — body-scale fractions, not angles)
+ * In both cases defaultReps is just the suggested rep count. This helper only
+ * looks the object up and hands it back; it does not care which shape it is.
  *
  * @param {('pushup'|'situp')} exerciseId
  * @param {('easy'|'standard'|'hard')} difficulty
- * @returns {{downAngle:number, upAngle:number, defaultReps:number}}
+ * @returns {({downAngle:number, upAngle:number, defaultReps:number}
+ *          | {downFraction:number, upFraction:number, defaultReps:number})}
  */
 export function getPreset(exerciseId, difficulty) {
   const exercise = getExercise(exerciseId);
@@ -225,12 +281,15 @@ const ORIENTATION_JOINTS = {
  * Decide whether the body is in the orientation this exercise expects, using
  * the chosen (more visible) side's shoulder and hip.
  *
- * This is the gate that fixes the "standing and bending your arms counts as a
- * push-up" bug: for push-ups (orientation 'horizontal') we only return true
- * when the torso is roughly level with the floor.
+ * Sit-ups use a lenient 'horizontal' sanity check here (reject an obviously
+ * fully-standing body). Push-ups now use 'any', so this function never blocks
+ * push-up counting: they are guarded by the body-relative vertical excursion in
+ * createVerticalRepCounter instead, which keeps working when the hip is out of
+ * frame (see the header comment for why).
  *
  * It is lenient on purpose:
- *   - If the exercise does not care about orientation ('any'), we return true.
+ *   - If the exercise does not care about orientation ('any', e.g. push-ups),
+ *     we return true — nothing to gate on.
  *   - If we cannot see the shoulder or hip on the chosen side, we return true
  *     so a missing hip never blocks counting on its own. The separate
  *     confidence (anti-cheat) gate is what handles "we cannot see you".
