@@ -339,15 +339,32 @@
   user-select: none;
 }
 
+/* The hold progress bar has THREE layers stacked on top of each other inside
+   the button, and the z-index values decide what paints over what:
+     1. the button's own dark background (the default layer, no z-index)
+     2. .emergency-fill  (z-index 1) -> the growing red bar, ABOVE the
+        background so you can actually see it fill left-to-right
+     3. .emergency-label (z-index 2) -> the text, ABOVE the fill so the words
+        stay readable while the bar slides underneath them
+   Without these z-index values the bar can hide behind the background or cover
+   up the text, which is the visual bug this layering fixes. */
 .emergency-fill {
   position: absolute;
   left: 0;
   top: 0;
   bottom: 0;
+  z-index: 1;
   background: rgba(248, 113, 113, 0.35);
   width: 0;
   pointer-events: none;
   transition: width 0.05s linear;
+}
+
+/* Keep the button text on its own layer above the fill so the words stay
+   sharp and readable as the red bar grows behind them. */
+.emergency-label {
+  position: relative;
+  z-index: 2;
 }
 
 .emergency-caption {
