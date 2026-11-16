@@ -293,6 +293,39 @@ describe('resolveDay: miss reconciliation (gap counted from last ACTIVE day)', (
     expect(next.streak).toBe(0);
     expect(next.settings.pushup.currentTarget).toBe(10);
   });
+
+  it('falls back to lastCompletedDate when an OLDER saved state has no lastActiveDate', () => {
+    // Simulate a save written BEFORE the lastActiveDate field existed: the key
+    // is deliberately ABSENT (not null), so lastActiveDay(state) must fall back
+    // to lastCompletedDate for the miss/decay gap. We seed lastResolvedDate to
+    // the same last-completed day so the idempotency guard does not short-circuit.
+    const legacy = createInitialState({ exercise: 'pushup', difficulty: 'standard', startingTarget: 10 });
+    const olderSave = {
+      ...legacy,
+      streak: 5,
+      lastCompletedDate: '2026-01-01',
+      lastResolvedDate: '2026-01-01',
+      settings: {
+        pushup: { ...legacy.settings.pushup, currentTarget: 30 },
+      },
+    };
+    // lastActiveDate must not be present at all (older save predates the field).
+    delete olderSave.lastActiveDate;
+    expect('lastActiveDate' in olderSave).toBe(false);
+
+    // gap-3 case: today is 3 calendar days after the last COMPLETED day -> TWO
+    // days actually missed. Streak resets and the target decays by 2 flat
+    // (30 -> 28), proving the gap was measured from lastCompletedDate.
+    const reset = resolveDay(olderSave, '2026-01-04');
+    expect(reset.streak).toBe(0);
+    expect(reset.settings.pushup.currentTarget).toBe(28);
+
+    // gap-2 case: today is 2 calendar days after the last COMPLETED day -> ONE
+    // day actually missed, so the fallback HOLDS at the same corrected boundary.
+    const held = resolveDay(olderSave, '2026-01-03');
+    expect(held.streak).toBe(5);
+    expect(held.settings.pushup.currentTarget).toBe(30);
+  });
 });
 
 describe('resolveDay: keyed to WORKOUTS DONE, not app opens', () => {
