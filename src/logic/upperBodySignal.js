@@ -106,41 +106,84 @@ export function measureBodyScale(keypointsByName) {
  * This single number is the "signal" the counter watches go DOWN (bigger y) and
  * back UP (smaller y). We want it to reflect the HEAD and SHOULDERS moving
  * together during a push-up:
- *   - If the nose is visible, we average the chosen shoulder's y with the nose's
+ *   - If the nose is visible, we average the chosen anchor's y with the nose's
  *     y, so the signal follows the whole head+shoulders block dipping down.
- *   - If the nose is not available, we fall back to the shoulder's y on its own.
+ *   - If the nose is not available, we fall back to the anchor's y on its own.
+ *
+ * THE LIVE BUG THIS FUNCTION NOW SURVIVES (read this, it is the whole fix):
+ *   In this tfjs BlazePose runtime the 2D x/y come back null and are PROJECTED
+ *   from the 3D world landmarks by keypointAdapter.js. On many live frames the
+ *   CHOSEN side's shoulder has a null/unprojectable 3D landmark, so its pixel y
+ *   stays null. The OLD version read ONLY that one chosen shoulder and returned
+ *   null the instant it was missing, which is exactly why the live diagnostics
+ *   showed upperBodyY null EVERY frame even though bodyScalePx stayed a real,
+ *   locked 107. measureBodyScale survived the same frames because it already
+ *   falls back from one shoulder to the other and to the nose. We now give the
+ *   Y read that SAME resilience.
+ *
+ * THE FALLBACK ORDER (chosen side is a PREFERENCE, not a hard requirement):
+ *   1. the CHOSEN side's shoulder y (what pickBetterSide asked for), else
+ *   2. the OTHER shoulder's y (the one that DID project this frame), else
+ *   3. the nose's y on its own.
+ *   We only return null when NONE of those three has a usable (finite) y, i.e.
+ *   there is genuinely no upper-body anchor to report. When the chosen anchor
+ *   AND the nose are both present we keep the original nose-averaging so the
+ *   signal still tracks the head+shoulders block together.
  *
  * We return a plain number so it can flow straight through createAngleSmoother
  * (which just averages whatever numbers you push into it).
  *
  * @param {object} keypointsByName  Map of MoveNet keypoints keyed by name.
- * @param {'left'|'right'} side     Which side's shoulder to read.
- * @returns {number|null} a y pixel value, or null if the shoulder is missing.
+ * @param {'left'|'right'} side     Which side's shoulder to prefer.
+ * @returns {number|null} a y pixel value, or null if no anchor is usable.
  */
 export function measureUpperBodyY(keypointsByName, side) {
   if (!keypointsByName) {
     return null;
   }
 
-  const shoulder =
+  // Pick the preferred-vs-other shoulder based on the chosen side, then take
+  // whichever one actually has a finite y this frame. This is the resilience
+  // measureBodyScale already had and measureUpperBodyY was missing.
+  const preferredShoulder =
     side === 'right'
       ? keypointsByName.right_shoulder
       : keypointsByName.left_shoulder;
+  const otherShoulder =
+    side === 'right'
+      ? keypointsByName.left_shoulder
+      : keypointsByName.right_shoulder;
 
-  // Without the chosen shoulder we have no signal to report.
-  if (!shoulder || typeof shoulder.y !== 'number') {
-    return null;
+  // The "anchor" is the best shoulder we can read: chosen first, then the other.
+  let anchorY = null;
+  if (preferredShoulder && typeof preferredShoulder.y === 'number') {
+    anchorY = preferredShoulder.y;
+  } else if (otherShoulder && typeof otherShoulder.y === 'number') {
+    anchorY = otherShoulder.y;
   }
 
   const nose = keypointsByName.nose;
+  const noseY = nose && typeof nose.y === 'number' ? nose.y : null;
 
-  // Nose present: average head + shoulder so the signal tracks them together.
-  if (nose && typeof nose.y === 'number') {
-    return (shoulder.y + nose.y) / 2;
+  // Both a shoulder anchor AND the nose: average them so the signal tracks the
+  // whole head+shoulders block (unchanged happy-path behavior).
+  if (anchorY !== null && noseY !== null) {
+    return (anchorY + noseY) / 2;
   }
 
-  // Shoulder-only fallback.
-  return shoulder.y;
+  // Only a shoulder anchor: use it on its own.
+  if (anchorY !== null) {
+    return anchorY;
+  }
+
+  // No shoulder this frame but we DO have the nose: better than nothing, the
+  // head still dips during a push-up. (Last-resort anchor.)
+  if (noseY !== null) {
+    return noseY;
+  }
+
+  // Truly nothing upper-body to report.
+  return null;
 }
 
 // -----------------------------------------------------------------------------
@@ -236,37 +279,83 @@ export function measureDepthScale(keypointsByName) {
  * Measure the representative UPPER-BODY DEPTH (a z meter value) for the chosen
  * side, mirroring measureUpperBodyY but on the depth axis.
  *
- * Just like the y signal averages the chosen shoulder with the nose when the
- * nose is present, we average the shoulder's z with the nose's z so the depth
+ * Just like the y signal averages the chosen anchor with the nose when the
+ * nose is present, we average the anchor's z with the nose's z so the depth
  * signal follows the whole head+shoulders block moving toward/away from the
- * camera. We read the `z` field the keypoint adapter attached (meters). If the
- * chosen shoulder has no z (no 3D this frame), we return null so the caller
- * falls back to the y-only signal.
+ * camera.
+ *
+ * WE READ THE TRUE 3D z (meters), NEVER A PROJECTED PIXEL. The keypoint adapter
+ * attaches `z` (and `z3d`) straight from the BlazePose world landmark in meters.
+ * projectWorldToPixels only ever overwrites x/y, so `z` is always the real depth
+ * end to end, which is what makes the depth dip meaningful. (If a future build
+ * returns real 2D pixels, z is still the untouched meter depth.)
+ *
+ * THE SAME CHOSEN-SIDE-PREFERRED FALLBACK AS measureUpperBodyY (this is the
+ * fix for the frozen zDip). The OLD version read ONLY the chosen shoulder's z
+ * and returned null the instant that one shoulder's 3D landmark was missing.
+ * On a live frame where the chosen shoulder's 3D is null, that made the depth
+ * read vanish for that frame even though the other shoulder and the nose had
+ * perfectly good z values. We now prefer the chosen side but fall back to the
+ * other shoulder's z and then the nose's z, so the depth signal keeps varying
+ * frame to frame instead of freezing. Order:
+ *   1. the CHOSEN side's shoulder z, else
+ *   2. the OTHER shoulder's z, else
+ *   3. the nose's z on its own.
+ * We only return null when NONE of those has a usable (finite) z (no 3D this
+ * frame at all), in which case the caller falls back to the y-only signal.
  *
  * REMEMBER THE SIGN: smaller/more-negative z = closer to the camera. We return
  * the raw z here (no flip); the combine step below is where we turn a DECREASE
  * in z into a positive "down-and-toward-camera" dip.
  *
- * @param {object} keypointsByName  Keypoints keyed by name (carrying z).
- * @param {'left'|'right'} side     Which side's shoulder to read.
- * @returns {number|null} a z meter value, or null if depth is unavailable.
+ * @param {object} keypointsByName  Keypoints keyed by name (carrying z meters).
+ * @param {'left'|'right'} side     Which side's shoulder to prefer.
+ * @returns {number|null} a z meter value, or null if no anchor has depth.
  */
 export function measureUpperBodyDepth(keypointsByName, side) {
   if (!keypointsByName) {
     return null;
   }
-  const shoulder =
+
+  // Preferred-vs-other shoulder, exactly like the Y read above.
+  const preferredShoulder =
     side === 'right'
       ? keypointsByName.right_shoulder
       : keypointsByName.left_shoulder;
-  if (!shoulder || typeof shoulder.z !== 'number') {
-    return null;
+  const otherShoulder =
+    side === 'right'
+      ? keypointsByName.left_shoulder
+      : keypointsByName.right_shoulder;
+
+  // The depth anchor is the best shoulder z we can read: chosen first, then the
+  // other. These are TRUE meters (kp.z), never a projected pixel.
+  let anchorZ = null;
+  if (preferredShoulder && typeof preferredShoulder.z === 'number') {
+    anchorZ = preferredShoulder.z;
+  } else if (otherShoulder && typeof otherShoulder.z === 'number') {
+    anchorZ = otherShoulder.z;
   }
+
   const nose = keypointsByName.nose;
-  if (nose && typeof nose.z === 'number') {
-    return (shoulder.z + nose.z) / 2;
+  const noseZ = nose && typeof nose.z === 'number' ? nose.z : null;
+
+  // Both a shoulder anchor AND the nose: average them (unchanged happy path).
+  if (anchorZ !== null && noseZ !== null) {
+    return (anchorZ + noseZ) / 2;
   }
-  return shoulder.z;
+
+  // Only a shoulder anchor.
+  if (anchorZ !== null) {
+    return anchorZ;
+  }
+
+  // No shoulder z this frame but the nose carries depth: use it on its own.
+  if (noseZ !== null) {
+    return noseZ;
+  }
+
+  // No usable depth anywhere upper-body this frame.
+  return null;
 }
 
 /**
