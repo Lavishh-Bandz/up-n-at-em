@@ -12,40 +12,45 @@
 //
 // TWO DIFFERENT DETECTION STYLES (read this first):
 //   SIT-UPS are counted from a JOINT ANGLE (shoulder->hip->knee) using the
-//   angle-based createRepCounter. Nothing about sit-ups changed.
+//   angle-based createRepCounter. Nothing about sit-ups changed in this pass.
 //
-//   PUSH-UPS are counted from the VISIBLE UPPER BODY moving DOWN toward the
-//   floor and back UP (Solution 1), using the position-based
-//   createVerticalRepCounter. We switched because a normal webcam physically
-//   cannot fit a whole body doing a floor push-up, so the old full-body
-//   side-profile elbow angle (which needed the elbow, wrist AND hip in frame)
-//   left real users counting zero. The upper-body approach only needs the
-//   shoulders (and optionally the nose), so it keeps counting even when the
-//   legs/hips are out of frame.
+//   PUSH-UPS are now ALSO counted from a JOINT ANGLE — the ELBOW angle
+//   (shoulder -> elbow -> wrist) — using the SAME angle-based createRepCounter.
+//   This is how essentially every working push-up counter does it: watch the
+//   elbow bend down and straighten back up, with an up/down state machine.
+//   The KEY difference from a naive elbow-angle counter is that we measure the
+//   angle in the 3D world-landmark space (x3d/y3d/z3d, in meters) that this
+//   BlazePose runtime actually populates, NOT the 2D pixels (which come back
+//   null live). A 3D angle is both SCALE-invariant (it does not matter how big
+//   you look in frame) and far less VIEWPOINT-dependent (side-on, angled, and —
+//   best effort — front-on all read a bent elbow as bent), so it sidesteps the
+//   whole null-2D-pixel / body-scale-ruler problem the old position method hit.
+//
+// WHY WE DROPPED THE OLD POSITION METHOD:
+//   The previous push-up path watched the upper body's vertical PIXEL position
+//   dip as a fraction of a pixel body-scale ruler. In this runtime the 2D
+//   pixels are null and only rebuilt from 3D, so that ruler and the y-dip went
+//   unreliable and real users counted zero. An elbow angle computed straight
+//   from the 3D landmarks never touches a pixel, so it just works.
 //
 // BODY ORIENTATION (anti-cheat, part 2):
-//   Counting a rep from a joint angle alone is not enough. Standing up and just
-//   bending your elbows makes the elbow angle go down then up exactly like a
-//   real push-up, so it used to count. To stop that, each exercise also says
-//   what body ORIENTATION it expects:
-//     'horizontal' = your torso should be roughly level with the floor (you are
-//                    actually down in a push-up / plank position, not standing).
-//     'any'        = we do not gate on orientation for this exercise.
-//   The check compares the tilt of your shoulder->hip line using the pure
-//   isBodyHorizontal helper from angles.js (see evaluateOrientation below).
-//
-//   PUSH-UPS now use 'any' on purpose. The old 'horizontal' gate measured the
-//   shoulder->hip tilt, but the hip is exactly the keypoint that drops out of
-//   frame on a webcam, so keeping it would re-break counting for the users we
-//   are trying to help. Instead, a standing "bob" is rejected by the detection
-//   itself: the vertical excursion is measured as a FRACTION of the user's own
-//   body-scale, so a small standing nod is a tiny fraction while a real floor
-//   push-up is a large one, and the two-threshold hysteresis plus the 5-second
-//   get-into-position arming countdown keep casual wobble from counting.
-//   HONEST TRADE-OFF: position-based detection is a little less precise than a
-//   clean side-profile elbow angle, but it is the only approach that actually
-//   works within a webcam's field of view; the smoothing + hysteresis + arming
-//   countdown are what make it trustworthy in practice.
+//   Counting a rep from an elbow angle alone is not enough. Standing up and
+//   just bending your elbows makes the elbow angle go down then up exactly like
+//   a real push-up, so it would count a fake rep. To stop that, each exercise
+//   also says what body POSTURE it expects:
+//     'horizontal'   = your torso should be roughly level with the floor (you
+//                      are actually down in a push-up / plank, not standing).
+//                      Used by SIT-UPS via the 2D isBodyHorizontal check.
+//     'pushup3d'     = a coarse 3D push-up-posture gate (see isPushupPosture3D
+//                      below): the torso must be plausibly horizontal in the
+//                      real-world landmarks. Used by PUSH-UPS.
+//     'any'          = we do not gate on orientation for this exercise.
+//   The 3D gate is what stops a standing body from ever arming the 5-second
+//   countdown or counting a rep (root-cause #4: before, push-ups used 'any', so
+//   merely seeing one shoulder armed the countdown). It is deliberately a COARSE
+//   gate and FAILS OPEN only when it genuinely cannot tell (missing 3D), so a
+//   dropped keypoint never silently blocks a real rep — the confidence gate
+//   handles "we cannot see you".
 //
 // JOINT NAMES come from MoveNet, the pose-detection model we use. MoveNet names
 // its 17 keypoints like: 'left_shoulder', 'left_elbow', 'left_wrist',
@@ -62,111 +67,81 @@
 //   side the camera can see more confidently (see pickBetterSide below).
 
 import { isBodyHorizontal } from './angles.js';
-import { DEFAULT_POSTURE_CONFIG } from './upperBodySignal.js';
 
 /**
- * PUSH-UP (position-based; see header)
- *   Tracked signal: the VISIBLE UPPER BODY's vertical position (the chosen
- *   side's shoulder, averaged with the nose when it is visible). A rep is a
- *   DOWN-then-UP excursion measured as a fraction of the user's body-scale.
- *     top of a push-up    = upper body high  = small y
- *     bottom of a push-up = upper body low   = large y (y grows downward)
- *   Only the SHOULDER(S) are required — no elbow, wrist or hip — so counting
- *   survives the legs/hips being out of a webcam's frame.
+ * PUSH-UP (angle-based, 3D; see header)
+ *   Tracked angle: the ELBOW angle (shoulder -> elbow -> wrist), measured in
+ *   the 3D world landmarks (meters) via angleBetween3D.
+ *     top of a push-up    = arms extended = LARGE angle (~150-160+)
+ *     bottom of a push-up = elbow bent    = SMALL angle (~90-110)
+ *   All three joints on the chosen side (shoulder, elbow, wrist) must be
+ *   confidently visible for the rep to count — that is what the angle needs.
  *
- * SIT-UP (angle-based; unchanged)
+ * SIT-UP (angle-based; unchanged this pass)
  *   Tracked angle: the HIP / torso angle (shoulder -> hip -> knee).
  *     lying down flat = torso open   = large angle (~150+)
  *     sitting up      = torso folded = small angle (~80)
  *
- * For sit-ups, each SIDE's `angleJoints` is [outerA, vertex, outerC] in the
- * order angleBetween() expects. For push-ups there is no angle, so `angleJoints`
- * is null (the vertical path never reads it) and `signalJoints` names the single
- * shoulder whose y we track on that side. `requiredKeypoints` always lists every
- * joint that must be confidently visible on that side for the rep to count. The
- * two sides live under `sides.left` and `sides.right`.
+ * For BOTH exercises now, each SIDE's `angleJoints` is [outerA, vertex, outerC]
+ * in the order the angle helper expects (the middle joint is the vertex we
+ * measure). `requiredKeypoints` always lists every joint that must be
+ * confidently visible on that side for the rep to count. The two sides live
+ * under `sides.left` and `sides.right`.
  */
 export const EXERCISES = {
   pushup: {
     id: 'pushup',
     label: 'Push-ups',
-    // 'any' on purpose: push-ups are counted from upper-body vertical movement,
-    // not the shoulder->hip tilt, so we must NOT gate on an orientation that
-    // needs the hip (the hip is what falls out of frame on a webcam). The
-    // body-relative excursion + hysteresis + the 5s arming countdown are what
-    // reject a standing bob now. See the header comment for the full rationale.
-    orientation: 'any',
-    // ANTI-STANDING GUARD CONFIG (pure data, easy to find + tune live).
-    // These feed isPushupPosture / createPostureGuard in upperBodySignal.js.
-    // The guard uses ONLY upper-body keypoints (shoulders, nose, wrists) so it
-    // never re-requires the hip. See upperBodySignal.js for the full rationale
-    // and honest trade-offs. They are STARTING values meant to be nudged live
-    // via the debug readout.
-    postureGuard: {
-      ...DEFAULT_POSTURE_CONFIG,
-      wristStationaryFraction: 0.2,
-    },
-    // DEPTH (any-viewpoint) CONFIG (pure data, easy to find + tune live).
-    // Push-ups are now counted from a COMBINED signal: the upper body moving
-    // DOWN the screen (y) and/or TOWARD the camera (depth z). Side-on reps move
-    // mostly in y; front-on reps move mostly in z. See measureCombinedDownSignal
-    // in upperBodySignal.js for the exact combine rule (a MAX of the two
-    // body-relative dips). The y axis is normalized by the locked PIXEL body
-    // scale (shoulder width in pixels) and the z axis by a locked METER depth
-    // scale (3D shoulder width), both captured once during the 5s arming hold.
-    // `useDepth` lets you turn the depth component off to fall back to the old
-    // pure-y behavior if a particular camera's depth estimate is noisy. Starting
-    // value meant to be nudged live via the debug readout.
-    depth: {
-      useDepth: true,
-    },
+    // '3d' push-up posture gate (see isPushupPosture3D + evaluateOrientation
+    // below). The torso must be plausibly HORIZONTAL in the real-world 3D
+    // landmarks for the body to be "in position". This is the fix for the
+    // countdown advancing when the user was NOT in position: before, push-ups
+    // used 'any' (always true), so merely seeing one shoulder armed the 5s
+    // countdown. The 3D gate needs no pixels, so it survives the null-2D runtime.
+    orientation: 'pushup3d',
+    // How far (in degrees) the 3D torso line (shoulders -> hips) may tilt away
+    // from flat/horizontal and still count as a push-up / plank posture. A real
+    // push-up torso is roughly level with the floor (small tilt); a standing
+    // body is near-vertical (large tilt). Generous on purpose so a low or
+    // slightly-angled webcam still passes a genuine plank. Starting value meant
+    // to be nudged live via the debug readout.
+    postureMaxTiltDegrees: 50,
     sides: {
-      // Push-ups need only the chosen side's SHOULDER: it is both the vertical
-      // signal and the anchor for the body-scale ruler. We deliberately do NOT
-      // require the elbow, wrist or hip anymore, because those are the joints a
-      // webcam cannot fit during a real floor push-up. pickBetterSide therefore
-      // now chooses the better-visible SHOULDER side. `angleJoints` is null —
-      // the vertical counter ignores it — and `signalJoints` names the shoulder
-      // whose y we track. (The body-scale helper still uses BOTH shoulders when
-      // they are both visible, falling back to nose-to-shoulder; that happens in
-      // upperBodySignal.js and does not need to be a per-side "required" joint.)
+      // Push-ups now need the chosen side's SHOULDER, ELBOW and WRIST — the
+      // three joints the elbow angle is measured from. pickBetterSide therefore
+      // picks whichever side shows those three most confidently (its
+      // sumSideConfidence reads kp.score, which the adapter populates for the
+      // 3D-derived keypoints). `angleJoints` lists them in [shoulder, elbow,
+      // wrist] order so the elbow is the vertex angleBetween3D measures.
       left: {
-        angleJoints: null,
-        signalJoints: ['left_shoulder'],
-        requiredKeypoints: ['left_shoulder'],
+        angleJoints: ['left_shoulder', 'left_elbow', 'left_wrist'],
+        requiredKeypoints: ['left_shoulder', 'left_elbow', 'left_wrist'],
       },
       right: {
-        angleJoints: null,
-        signalJoints: ['right_shoulder'],
-        requiredKeypoints: ['right_shoulder'],
+        angleJoints: ['right_shoulder', 'right_elbow', 'right_wrist'],
+        requiredKeypoints: ['right_shoulder', 'right_elbow', 'right_wrist'],
       },
     },
     difficulties: {
-      // Push-up presets are BODY-SCALE FRACTIONS consumed by
-      // createVerticalRepCounter, NOT angles:
-      //   downFraction = how far the upper body must dip DOWN (as a fraction of
-      //                  shoulder-width in pixels) to reach the bottom.
-      //   upFraction   = the smaller excursion you must rise back above to
-      //                  complete the rep. Always upFraction < downFraction.
-      // These are sensible STARTING POINTS; they are meant to be felt out live
-      // in a real browser and nudged to taste via the debug readout. Harder = a
-      // deeper required dip (bigger downFraction) and more reps; easier = a
-      // shallower dip.
+      // Push-up presets are now ELBOW ANGLES (degrees) consumed by
+      // createRepCounter, exactly like sit-ups:
+      //   downAngle = bend the elbow PAST this (angle <= downAngle) to reach the
+      //               bottom of the push-up. The SMALLER number of the pair.
+      //   upAngle   = straighten the elbow PAST this (angle >= upAngle) to
+      //               complete the rep. The LARGER number of the pair.
+      // createRepCounter requires downAngle < upAngle, and the gap between them
+      // is the hysteresis band that swallows resting jitter.
       //
-      // WHY THESE ARE LOWER THAN BEFORE (root-cause #3):
-      //   The old 0.25/0.35/0.45 downFractions assume the upper body visibly
-      //   travels a big fraction of a shoulder-width. From a low or front-ish
-      //   webcam angle the APPARENT vertical travel of the head+shoulders is
-      //   compressed (perspective), so a real, deep push-up produced an
-      //   excursion well under 0.25 and counted ZERO. We start the required dip
-      //   SHALLOWER so a genuine rep can actually reach it; the stable ruler +
-      //   the anti-standing guard are what keep a small standing bob from
-      //   crossing these. upFraction stays a comfortable margin BELOW
-      //   downFraction so the hysteresis band still swallows resting jitter.
-      easy: { downFraction: 0.12, upFraction: 0.05, defaultReps: 10 },
-      standard: { downFraction: 0.16, upFraction: 0.06, defaultReps: 20 },
-      // Harder = deeper dip + more reps.
-      hard: { downFraction: 0.22, upFraction: 0.08, defaultReps: 45 },
+      // These are FIELD-STANDARD STARTING VALUES (a bent elbow is ~90-110 deg
+      // at the bottom, an extended arm is ~150-160 deg at the top). They are
+      // meant to be felt out live in a real browser and nudged to taste via the
+      // debug readout. HARDER = a DEEPER bend (a SMALLER downAngle) + a
+      // STRAIGHTER lockout (a BIGGER upAngle) + more reps; EASIER = a shallower
+      // bend and fewer reps.
+      easy: { downAngle: 110, upAngle: 150, defaultReps: 10 },
+      standard: { downAngle: 100, upAngle: 155, defaultReps: 20 },
+      // Harder = deeper bend (smaller downAngle) + straighter lockout + more reps.
+      hard: { downAngle: 90, upAngle: 160, defaultReps: 45 },
     },
   },
 
@@ -217,18 +192,15 @@ export function getExercise(exerciseId) {
 }
 
 /**
- * Get the difficulty preset for an exercise. The SHAPE depends on the exercise,
- * because the two exercises are counted in different ways:
- *   - sit-ups return { downAngle, upAngle, defaultReps } (fed to createRepCounter)
- *   - push-ups return { downFraction, upFraction, defaultReps } (fed to
- *     createVerticalRepCounter — body-scale fractions, not angles)
- * In both cases defaultReps is just the suggested rep count. This helper only
- * looks the object up and hands it back; it does not care which shape it is.
+ * Get the difficulty preset for an exercise. BOTH exercises are now counted
+ * from a joint ANGLE, so both return the same shape:
+ *   { downAngle, upAngle, defaultReps } (fed to createRepCounter)
+ * where downAngle < upAngle. defaultReps is just the suggested rep count. This
+ * helper only looks the object up and hands it back.
  *
  * @param {('pushup'|'situp')} exerciseId
  * @param {('easy'|'standard'|'hard')} difficulty
- * @returns {({downAngle:number, upAngle:number, defaultReps:number}
- *          | {downFraction:number, upFraction:number, defaultReps:number})}
+ * @returns {{downAngle:number, upAngle:number, defaultReps:number}}
  */
 export function getPreset(exerciseId, difficulty) {
   const exercise = getExercise(exerciseId);
@@ -274,6 +246,13 @@ export function sumSideConfidence(keypointsByName, jointNames) {
  * track whichever side is more visible, so a user facing either way still
  * counts reps. Ties go to the left side (an arbitrary but stable default).
  *
+ * For PUSH-UPS the required joints are now the shoulder/elbow/wrist that the
+ * elbow angle is measured from, so the side pick directly reflects which arm's
+ * elbow the camera can see most confidently. For SIT-UPS they are the
+ * shoulder/hip/knee of the torso angle. Either way this is just a confidence
+ * sum over whatever requiredKeypoints the descriptor lists — nothing special
+ * per exercise.
+ *
  * This is a PURE function (no React, no DOM) so it can be unit tested with
  * made-up keypoint maps.
  *
@@ -314,28 +293,146 @@ const ORIENTATION_JOINTS = {
   right: { shoulder: 'right_shoulder', hip: 'right_hip' },
 };
 
+// How far (degrees) the 3D torso line may tilt from flat and still read as a
+// push-up / plank posture, when a descriptor does not state its own value.
+const DEFAULT_PUSHUP_MAX_TILT_DEGREES = 50;
+
+/**
+ * Coarse 3D PUSH-UP posture gate: is the body plausibly DOWN in a push-up /
+ * plank right now, judged from the real-world 3D landmarks (meters)?
+ *
+ * WHY 3D AND NOT THE OLD 2D CHECK (root-cause #4):
+ *   The push-up arming gate used to effectively be "is one shoulder visible?"
+ *   (orientation 'any'), so the 5-second get-into-position countdown advanced
+ *   even when the user was standing up. We need a real posture test, but we
+ *   cannot use the 2D pixels (they come back null in this runtime). The 3D
+ *   world landmarks ARE populated, so we measure posture there instead.
+ *
+ * HOW IT WORKS (plain language):
+ *   During a real push-up your whole torso is stretched out roughly LEVEL with
+ *   the floor, so the line from your shoulders down to your hips is nearly
+ *   HORIZONTAL in the real world. When you are standing, that same line is
+ *   nearly VERTICAL. We build a torso line from the 3D shoulder-center to the
+ *   3D hip-center and measure how far it tilts away from flat:
+ *     ~0 degrees  = lying flat / plank (horizontal)  -> in position
+ *     ~90 degrees = standing upright (vertical)        -> NOT in position
+ *   World y grows DOWNWARD and z is depth; we combine the vertical drop (y) and
+ *   the depth run (z) into the "along the floor" distance so the test works
+ *   whether the camera is to the side or in front. If the tilt is within
+ *   `maxTiltDegrees` of flat we call it a push-up posture.
+ *
+ * HONEST LIMITS (read this):
+ *   - This is a COARSE gate, not a precise plank detector. Its one job is to
+ *     clearly separate "standing tall" from "down on the floor".
+ *   - It FAILS OPEN (returns true) only when it genuinely cannot tell — i.e.
+ *     the 3D shoulder/hip landmarks needed for the torso line are missing — so
+ *     a dropped keypoint never silently blocks a real rep. The confidence gate
+ *     handles "we cannot see you". When the 3D IS present, a clearly upright
+ *     body is rejected.
+ *   - FRONT-FACING is best-effort: the elbow angle is the real backbone of
+ *     counting; this gate just keeps a standing body from arming / counting.
+ *
+ * Pure function: hand it the keypoint map and the chosen side; get true/false.
+ *
+ * @param {Object<string,{x3d?:number,y3d?:number,z3d?:number}>} keypointsByName
+ * @param {('left'|'right')} side  The side pickBetterSide chose (preferred).
+ * @param {object} [options]
+ * @param {number} [options.maxTiltDegrees=DEFAULT_PUSHUP_MAX_TILT_DEGREES]
+ * @returns {boolean} true if the body plausibly looks like a push-up posture.
+ */
+export function isPushupPosture3D(
+  keypointsByName,
+  side,
+  { maxTiltDegrees = DEFAULT_PUSHUP_MAX_TILT_DEGREES } = {}
+) {
+  if (!keypointsByName) {
+    return true; // nothing to judge -> fail open
+  }
+
+  // Tiny helper: does this point carry finite 3D meter coordinates?
+  const has3D = (p) =>
+    p &&
+    Number.isFinite(p.x3d) &&
+    Number.isFinite(p.y3d) &&
+    Number.isFinite(p.z3d);
+
+  // Build a shoulder point and a hip point. Prefer BOTH sides' midpoint for a
+  // steadier torso line, but fall back to the chosen side alone (then the other
+  // side) so the gate still works when only one side has 3D.
+  const ls = keypointsByName.left_shoulder;
+  const rs = keypointsByName.right_shoulder;
+  const lh = keypointsByName.left_hip;
+  const rh = keypointsByName.right_hip;
+
+  const mid = (p1, p2) => ({
+    x3d: (p1.x3d + p2.x3d) / 2,
+    y3d: (p1.y3d + p2.y3d) / 2,
+    z3d: (p1.z3d + p2.z3d) / 2,
+  });
+
+  // Choose a shoulder reference.
+  let shoulder = null;
+  if (has3D(ls) && has3D(rs)) shoulder = mid(ls, rs);
+  else if (side === 'right' && has3D(rs)) shoulder = rs;
+  else if (side === 'left' && has3D(ls)) shoulder = ls;
+  else if (has3D(ls)) shoulder = ls;
+  else if (has3D(rs)) shoulder = rs;
+
+  // Choose a hip reference the same way.
+  let hip = null;
+  if (has3D(lh) && has3D(rh)) hip = mid(lh, rh);
+  else if (side === 'right' && has3D(rh)) hip = rh;
+  else if (side === 'left' && has3D(lh)) hip = lh;
+  else if (has3D(lh)) hip = lh;
+  else if (has3D(rh)) hip = rh;
+
+  // Without a 3D shoulder AND hip we cannot measure the torso line: fail open.
+  if (!shoulder || !hip) {
+    return true;
+  }
+
+  // Torso line in 3D. y is the real-world VERTICAL drop; x and z together are
+  // the "along the floor" run. A flat plank has a big horizontal run and almost
+  // no vertical drop; a standing body is the reverse.
+  const dyVertical = Math.abs(hip.y3d - shoulder.y3d);
+  const dxFloor = hip.x3d - shoulder.x3d;
+  const dzFloor = hip.z3d - shoulder.z3d;
+  const horizontalRun = Math.sqrt(dxFloor * dxFloor + dzFloor * dzFloor);
+
+  // A zero-length torso line tells us nothing -> fail open.
+  if (dyVertical === 0 && horizontalRun === 0) {
+    return true;
+  }
+
+  // Tilt away from flat: 0 deg = perfectly level, 90 deg = straight up/down.
+  const tiltDegrees =
+    Math.atan2(dyVertical, horizontalRun) * (180 / Math.PI);
+
+  return tiltDegrees <= maxTiltDegrees;
+}
+
 /**
  * Decide whether the body is in the orientation this exercise expects, using
- * the chosen (more visible) side's shoulder and hip.
+ * the chosen (more visible) side.
  *
- * Sit-ups use a lenient 'horizontal' sanity check here (reject an obviously
- * fully-standing body). Push-ups now use 'any', so this function never blocks
- * push-up counting: they are guarded by the body-relative vertical excursion in
- * createVerticalRepCounter instead, which keeps working when the hip is out of
- * frame (see the header comment for why).
+ * Sit-ups use a lenient 2D 'horizontal' sanity check here (reject an obviously
+ * fully-standing body from the shoulder->hip pixel tilt). Push-ups now use the
+ * 3D 'pushup3d' gate (isPushupPosture3D), which judges the torso tilt from the
+ * real-world landmarks instead of the null 2D pixels — this is what stops the
+ * 5s countdown advancing when the user is standing.
  *
  * It is lenient on purpose:
- *   - If the exercise does not care about orientation ('any', e.g. push-ups),
- *     we return true — nothing to gate on.
- *   - If we cannot see the shoulder or hip on the chosen side, we return true
- *     so a missing hip never blocks counting on its own. The separate
- *     confidence (anti-cheat) gate is what handles "we cannot see you".
+ *   - If the exercise does not care about orientation ('any' / unknown), we
+ *     return true — nothing to gate on.
+ *   - If the points a check needs are missing, the check fails open (returns
+ *     true) so a missing keypoint never blocks counting on its own. The
+ *     separate confidence (anti-cheat) gate handles "we cannot see you".
  *
  * Pure function: give it the exercise id, a keypoints-by-name map, and the side
  * to use, and it returns true/false.
  *
  * @param {('pushup'|'situp')} exerciseId
- * @param {Object<string,{x:number,y:number,score?:number}>} keypointsByName
+ * @param {Object<string,object>} keypointsByName
  * @param {('left'|'right')} side  The side pickBetterSide chose.
  * @returns {boolean} true if the body meets the exercise's orientation expectation.
  */
@@ -347,6 +444,16 @@ export function evaluateOrientation(exerciseId, keypointsByName, side) {
     return true;
   }
 
+  // PUSH-UP: the 3D posture gate (torso roughly horizontal in world space).
+  if (exercise.orientation === 'pushup3d') {
+    const options = {};
+    if (typeof exercise.postureMaxTiltDegrees === 'number') {
+      options.maxTiltDegrees = exercise.postureMaxTiltDegrees;
+    }
+    return isPushupPosture3D(keypointsByName, side, options);
+  }
+
+  // SIT-UP: the 2D shoulder->hip horizontal sanity check.
   const names = ORIENTATION_JOINTS[side] || ORIENTATION_JOINTS.left;
   const shoulder = keypointsByName ? keypointsByName[names.shoulder] : null;
   const hip = keypointsByName ? keypointsByName[names.hip] : null;
