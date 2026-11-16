@@ -57,11 +57,14 @@ export default function EmergencyExit({ onCancel }) {
         onTouchStart={startHolding}
         onTouchEnd={stopHolding}
       >
-        Emergency stop (hold 3s)
+        {/* The fill is a separate layer sitting UNDER the label (see App.css for
+            how the three layers stack). We keep it first in the markup and give
+            the label its own span so the growing red bar never hides the text. */}
         <span
           className="emergency-fill"
           style={{ width: `${progress * 100}%` }}
         />
+        <span className="emergency-label">Emergency stop (hold 3s)</span>
       </button>
       <p className="emergency-caption">
         For real emergencies only. Hold the button for 3 seconds to stop the

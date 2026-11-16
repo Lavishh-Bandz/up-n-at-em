@@ -155,6 +155,12 @@
   background: #000;
   border-radius: 14px;
   overflow: hidden;
+  /* The box shape is set from the camera's REAL frame size in CameraView.jsx
+     (an inline aspect-ratio once we know videoWidth/videoHeight). That way the
+     box is exactly the shape of the picture, so nothing gets cropped and there
+     are no black bars. Until we know the real size we fall back to this 4:3
+     default, which is the most common plain-webcam shape (so the first instant
+     before metadata loads looks sensible rather than stretched). */
   aspect-ratio: 4 / 3;
 }
 
@@ -164,7 +170,13 @@
   inset: 0;
   width: 100%;
   height: 100%;
-  object-fit: cover;
+  /* `contain` shows the FULL camera frame instead of cropping its edges off to
+     fill the box. Because we size the box to the camera's own shape (above),
+     `contain` doesn't letterbox in practice — it just guarantees we never crop.
+     Cropping (`cover`) could hide your arms/legs, which defeats the point. The
+     video and the canvas overlay use the SAME object-fit and the SAME box, so
+     the skeleton dots stay lined up with your body. */
+  object-fit: contain;
 }
 
 .camera-overlay {
@@ -181,6 +193,12 @@
   background: rgba(0, 0, 0, 0.6);
   border-radius: 8px;
   font-size: 0.85rem;
+}
+
+/* The pose-detector status line sits just ABOVE the camera-size readout so the
+   two little corner labels don't overlap each other. */
+.camera-status-model {
+  bottom: 2.75rem;
 }
 
 .camera-status-error {
@@ -239,9 +257,66 @@
   line-height: 1.4;
 }
 
+/* Layout stability: a row kept in the DOM but hidden. It still takes up its
+   normal space (so the panel keeps the same size), it just cannot be seen and
+   is skipped by screen readers. We use this for the warning and alarm rows so
+   they can appear/disappear WITHOUT shoving the rest of the panel up or down. */
+.hud-row-hidden {
+  visibility: hidden;
+}
+
 .hud-alarm {
   color: var(--accent);
   font-weight: 700;
+}
+
+/* The arming area holds three different looks (the "get into position" prompt,
+   the big countdown, and "Ready — GO!") that are swapped in and out. They are
+   different heights, so without help the panel would resize as they switch.
+   We give the slot a FIXED min-height (tall enough for the biggest look, the
+   countdown number + hint) and center its contents, so switching looks only
+   changes the text, never the panel size. */
+.hud-arming-slot {
+  min-height: 5.5rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+
+/* "Get into position…" prompt shown before a step arms. */
+.hud-arming {
+  color: var(--accent-2);
+  font-size: 1.1rem;
+  font-weight: 700;
+}
+
+/* "✓ Ready — GO!" shown once the position is confirmed and counting begins. */
+.hud-armed {
+  color: var(--accent);
+  font-size: 1.1rem;
+  font-weight: 800;
+}
+
+/* The big get-into-position countdown (5-4-3-2-1). */
+.hud-countdown {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.hud-countdown-number {
+  color: var(--accent-2);
+  font-size: 4rem;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.hud-countdown-hint {
+  color: var(--accent-2);
+  font-size: 0.95rem;
+  font-weight: 600;
 }
 
 /* ---- Emergency exit ----------------------------------------------------- */
@@ -264,15 +339,32 @@
   user-select: none;
 }
 
+/* The hold progress bar has THREE layers stacked on top of each other inside
+   the button, and the z-index values decide what paints over what:
+     1. the button's own dark background (the default layer, no z-index)
+     2. .emergency-fill  (z-index 1) -> the growing red bar, ABOVE the
+        background so you can actually see it fill left-to-right
+     3. .emergency-label (z-index 2) -> the text, ABOVE the fill so the words
+        stay readable while the bar slides underneath them
+   Without these z-index values the bar can hide behind the background or cover
+   up the text, which is the visual bug this layering fixes. */
 .emergency-fill {
   position: absolute;
   left: 0;
   top: 0;
   bottom: 0;
+  z-index: 1;
   background: rgba(248, 113, 113, 0.35);
   width: 0;
   pointer-events: none;
   transition: width 0.05s linear;
+}
+
+/* Keep the button text on its own layer above the fill so the words stay
+   sharp and readable as the red bar grows behind them. */
+.emergency-label {
+  position: relative;
+  z-index: 2;
 }
 
 .emergency-caption {
@@ -301,4 +393,66 @@
 
 .success-screen .start-button {
   max-width: 20rem;
+}
+
+/* ---- Debug readout ------------------------------------------------------ */
+/* A small, semi-transparent dev panel showing the EXACT numbers the push-up
+   detector used this frame, so the user can read them back to tune thresholds.
+   It mirrors the understated look of .camera-status (dark, rounded, small) and
+   is updated only a few times a second from throttled state, so it never
+   flickers or re-renders at frame rate. It sits in the corner and does not
+   obscure the skeleton overlay. */
+.debug-readout {
+  margin-top: 0.75rem;
+  padding: 0.5rem 0.75rem;
+  background: rgba(0, 0, 0, 0.6);
+  border-radius: 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.8rem;
+  line-height: 1.45;
+  text-align: left;
+  color: var(--text, #e2e8f0);
+}
+
+.debug-readout-title {
+  font-weight: 700;
+  margin-bottom: 0.25rem;
+  color: var(--accent);
+  letter-spacing: 0.03em;
+}
+
+.debug-line {
+  white-space: nowrap;
+}
+
+.debug-line strong {
+  color: var(--accent-2);
+}
+
+.debug-report {
+  margin-top: 0.4rem;
+}
+
+.debug-report-toggle {
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 6px;
+  color: inherit;
+  font: inherit;
+  padding: 0.2rem 0.5rem;
+  cursor: pointer;
+}
+
+.debug-report-text {
+  display: block;
+  width: 100%;
+  height: 10rem;
+  margin-top: 0.4rem;
+  background: rgba(0, 0, 0, 0.5);
+  color: inherit;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 6px;
+  font-family: inherit;
+  font-size: 0.72rem;
+  resize: vertical;
 }
