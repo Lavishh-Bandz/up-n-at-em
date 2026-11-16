@@ -22,6 +22,40 @@ import { BLAZEPOSE_KEYPOINT_NAMES } from '../logic/keypointAdapter.js';
 // the anti-cheat idea: faint guesses are not drawn.
 const DRAW_THRESHOLD = 0.3;
 
+// -----------------------------------------------------------------------------
+// SHOW_SKELETON_OVERLAY — the single on/off switch for the drawn skeleton.
+// -----------------------------------------------------------------------------
+// Set to false right now. Here is WHY, in plain terms:
+//
+//   This app runs BlazePose on the "tfjs" runtime. On this runtime the model's
+//   2D pixel joints (the ones that say "this elbow is at pixel x,y in the video
+//   image") come back empty, so keypointAdapter.js rebuilds an x/y for every
+//   joint by PROJECTING the 3D "world" landmarks onto the screen. Those world
+//   landmarks are measured relative to the MIDDLE OF THE HIPS, in meters — they
+//   describe the SHAPE of the body, but they carry NO information about WHERE in
+//   the camera picture the body actually is. So the projection can only park the
+//   skeleton at the center of the frame at a guessed size. The result is a
+//   skeleton that moves with your body's shape but floats in the middle of the
+//   screen, detached from you. That "floating skeleton" is more confusing than
+//   helpful, and the overlay was always meant to be optional, so we hide it.
+//
+//   IMPORTANT: hiding the drawing changes NOTHING about counting. The push-up
+//   math (the pixel "ruler" bodyScalePx) and the sit-up angle math still use the
+//   exact same projected x/y from keypointAdapter.js — only the on-screen dots
+//   and lines are turned off here. The live video, the "Camera: W×H" readout,
+//   and the model-status lines all keep showing.
+//
+//   HOW TO TURN IT BACK ON PROPERLY later: this flag exists so a future version
+//   can re-enable the overlay the moment it has REAL image-space joints. The
+//   underlying library CAN return true pixel joints (it multiplies the model's
+//   normalized 0..1 positions by the video's width/height). It currently returns
+//   empty ones only because the <video> element is not told its real pixel size,
+//   so the detector multiplies by zero. Once a real image-space keypoint source
+//   is wired in (for example by giving the detector the true frame size, or by
+//   reading the model's normalized landmarks directly), flip this to true and
+//   the dots/lines below will line up on the body again.
+const SHOW_SKELETON_OVERLAY = false;
+
 // BlazePose always returns its 33 keypoints in this fixed order, so we can map
 // an index from the adjacency list back to a joint name to look it up in the
 // map. We import the SAME ordered name list the keypoint adapter uses to key
@@ -234,7 +268,11 @@ export default function CameraView({ active, onPose }) {
 
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
+    // Always clear first so no stale frame lingers. When the overlay is hidden
+    // we stop right here: the canvas stays transparent and only the live video
+    // shows through. See SHOW_SKELETON_OVERLAY above for why it is hidden.
     ctx.clearRect(0, 0, canvas.width, canvas.height);
+    if (!SHOW_SKELETON_OVERLAY) return;
 
     // Draw the connecting lines (bones).
     ctx.lineWidth = 3;
