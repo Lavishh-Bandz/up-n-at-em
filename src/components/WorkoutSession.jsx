@@ -37,6 +37,7 @@ import {
 import { createPositionGate } from '../logic/positionGate.js';
 import { createStatusDebouncer } from '../logic/statusDebounce.js';
 import { createPushupDiagnostics } from '../logic/pushupDiagnostics.js';
+import { createSessionTimer } from '../logic/sessionTimer.js';
 
 // How many recent angle readings we average together to calm down detector
 // jitter before the rep counter sees them. A small window keeps fast reps
@@ -94,7 +95,9 @@ function makeCounterForStep(step) {
 /**
  * @param {object} props
  * @param {Array<{exercise,difficulty,targetReps}>} props.steps  The workout to perform.
- * @param {() => void} props.onComplete  Called when the whole workout is finished.
+ * @param {(result:{entries:Array<{exercise:string,reps:number}>, elapsedMs:number|null}) => void} props.onComplete
+ *        Called when the whole workout is finished, with the measured session
+ *        result (per-exercise reps + elapsed time) so App can display + record it.
  * @param {() => void} props.onEmergencyCancel  Called when the user uses the escape.
  * @param {{start:Function, stop:Function, playing:boolean}} props.alarm  Alarm hook controls.
  */
@@ -167,6 +170,19 @@ export default function WorkoutSession({
   const diagnosticsRef = useRef(null);
   if (diagnosticsRef.current === null) {
     diagnosticsRef.current = createPushupDiagnostics();
+  }
+  // OBSERVE-ONLY SESSION TIMER. One stopwatch for the whole workout. It starts
+  // at the FIRST step's arming (the "GO!" moment) and stops at workout
+  // completion, so the single measured span covers the entire session. It is
+  // TIME-INJECTED (we pass the same per-frame nowMs the rest of the pipeline
+  // already computed) and purely a MEASUREMENT: it must never influence
+  // counting, arming, posture, outlier rejection or progression. In v1 we only
+  // MEASURE + DISPLAY + STORE the elapsed time (shown on the success screen and
+  // saved into history); using time to auto-decide progression is deferred to
+  // v2. start() is idempotent, so a later step's arming never restarts it.
+  const sessionTimerRef = useRef(null);
+  if (sessionTimerRef.current === null) {
+    sessionTimerRef.current = createSessionTimer();
   }
 
   // React state mirrors just what the HUD needs to render.
@@ -413,6 +429,16 @@ export default function WorkoutSession({
       }
     }
 
+    // SESSION TIMER START. The moment ANY step arms (push-up or sit-up) we
+    // start the one session stopwatch, reusing the same nowMs already computed
+    // for this frame. start() is idempotent — the FIRST call wins — so in a
+    // multi-step workout only the very first step's arming starts the clock and
+    // the span covers the whole session. This is observe-only: it reads nowMs
+    // but changes nothing about counting, arming or progression.
+    if (isArmed && !wasArmed) {
+      sessionTimerRef.current.start(nowMs);
+    }
+
     // Detect the ARM transition (Begin / "GO!"). For push-ups this is where we
     // LOCK the ruler and START the diagnostics report.
     if (step.exercise === 'pushup' && isArmed && !wasArmed) {
@@ -612,13 +638,28 @@ export default function WorkoutSession({
     if (queue.isStepComplete()) {
       if (queue.isWorkoutComplete()) {
         // Whole workout done: THIS is the only normal way the alarm stops.
+        // SESSION TIMER STOP: freeze the stopwatch right here, reusing this
+        // frame's nowMs, BEFORE we hand control back to App via onComplete.
+        // After stop() the elapsedMs getter returns the final, frozen duration.
+        sessionTimerRef.current.stop(nowMs);
         // Close out and log the diagnostics report (if a push-up set was being
         // recorded) so the completed numbers are in the console as JSON.
         diagnosticsRef.current.finish('completed', nowMs);
         logReport('completed', diagnosticsRef.current.report);
         setDebugReport(diagnosticsRef.current.report);
         alarm.stop();
-        onComplete();
+        // Build the completed-session result from the workout queue's final
+        // tallies: the per-exercise reps actually done plus the measured
+        // elapsed time. App uses this to DISPLAY the time and RECORD the day
+        // into history via completeDay. (The timer did not affect any of the
+        // counting that produced these numbers — it only watched.)
+        const result = {
+          entries: queue
+            .snapshot()
+            .map((s) => ({ exercise: s.exercise, reps: s.completedReps })),
+          elapsedMs: sessionTimerRef.current.elapsedMs,
+        };
+        onComplete(result);
         return;
       }
       if (queue.advance()) {
@@ -668,9 +709,16 @@ export default function WorkoutSession({
 
   // ---- Emergency escape ----------------------------------------------------
   function handleEmergencyCancel() {
-    // Close out and log the diagnostics report so the numbers up to the exit
-    // are captured, then stop the alarm and leave (the alarm only ever stops on
-    // full completion or this emergency hold-to-exit).
+    // RECORDS NO PROGRESS, ON PURPOSE. This mid-workout hold-to-exit is a
+    // SAFETY hatch, not a workout outcome. It stops the alarm and ends the
+    // session but deliberately does NOT call any progress-recording path
+    // (no completeDay, no skipDay): an accidental or emergency bail-out must
+    // never count as a completed day OR as an intentional skip. The DELIBERATE
+    // "Skip today" action lives separately on the settings screen (see
+    // SettingsPanel's hold-to-skip control) exactly so the two cannot be
+    // confused. We only close out and log the diagnostics report so the numbers
+    // up to the exit are captured, then stop the alarm and leave (the alarm
+    // only ever stops on full completion or this emergency hold-to-exit).
     const nowMs =
       typeof performance !== 'undefined' && performance.now
         ? performance.now()

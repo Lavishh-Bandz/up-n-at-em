@@ -4,6 +4,7 @@ import {
   DIFFICULTIES,
   getExercise,
   getPreset,
+  getDailyIncrement,
   sumSideConfidence,
   pickBetterSide,
   evaluateOrientation,
@@ -110,6 +111,101 @@ describe('difficulty scaling', () => {
 
   it('throws on an unknown difficulty', () => {
     expect(() => getPreset('pushup', 'nightmare')).toThrow();
+  });
+});
+
+describe('difficulty list + daily increment (progressive overload)', () => {
+  // The expected daily rep bump per difficulty, easiest -> hardest.
+  const EXPECTED_INCREMENT = { easy: 1, standard: 2, hard: 3, extreme: 5 };
+
+  it('lists the four difficulties easiest -> hardest with extreme LAST', () => {
+    expect(DIFFICULTIES).toEqual(['easy', 'standard', 'hard', 'extreme']);
+    // extreme must be the final entry so the order stays easiest -> hardest.
+    expect(DIFFICULTIES[DIFFICULTIES.length - 1]).toBe('extreme');
+  });
+
+  it('gives every push-up and sit-up preset a numeric dailyIncrement of 1/2/3/5', () => {
+    for (const exerciseId of ['pushup', 'situp']) {
+      for (const difficulty of DIFFICULTIES) {
+        const preset = getPreset(exerciseId, difficulty);
+        expect(typeof preset.dailyIncrement).toBe('number');
+        expect(preset.dailyIncrement).toBe(EXPECTED_INCREMENT[difficulty]);
+      }
+    }
+  });
+
+  it('getDailyIncrement returns the right number per difficulty for both exercises', () => {
+    for (const exerciseId of ['pushup', 'situp']) {
+      expect(getDailyIncrement(exerciseId, 'easy')).toBe(1);
+      expect(getDailyIncrement(exerciseId, 'standard')).toBe(2);
+      expect(getDailyIncrement(exerciseId, 'hard')).toBe(3);
+      expect(getDailyIncrement(exerciseId, 'extreme')).toBe(5);
+    }
+  });
+
+  it('throws from getDailyIncrement on an unknown exercise or difficulty', () => {
+    expect(() => getDailyIncrement('backflip', 'easy')).toThrow();
+    expect(() => getDailyIncrement('pushup', 'nightmare')).toThrow();
+  });
+
+  it('adds a well-formed extreme push-up preset that preserves the hysteresis band', () => {
+    const hard = getPreset('pushup', 'hard');
+    const extreme = getPreset('pushup', 'extreme');
+    // Deeper (or equal-deepest) dip than hard, continuing the same direction,
+    // with upFraction comfortably below downFraction.
+    expect(extreme.downFraction).toBeGreaterThanOrEqual(hard.downFraction);
+    expect(extreme.upFraction).toBeGreaterThan(0);
+    expect(extreme.upFraction).toBeLessThan(extreme.downFraction);
+    // Still within the "reachable starting values" ceiling the other rows obey.
+    expect(extreme.downFraction).toBeLessThanOrEqual(0.25);
+    // More reps than hard.
+    expect(extreme.defaultReps).toBeGreaterThan(hard.defaultReps);
+  });
+
+  it('adds a well-formed extreme sit-up preset that preserves the hysteresis band', () => {
+    const hard = getPreset('situp', 'hard');
+    const extreme = getPreset('situp', 'extreme');
+    // Tighter fold than hard: smaller downAngle, larger upAngle.
+    expect(extreme.downAngle).toBeLessThan(hard.downAngle);
+    expect(extreme.upAngle).toBeGreaterThan(hard.upAngle);
+    // Hysteresis invariant for sit-ups still holds.
+    expect(extreme.downAngle).toBeLessThan(extreme.upAngle);
+    // More reps than hard.
+    expect(extreme.defaultReps).toBeGreaterThan(hard.defaultReps);
+  });
+
+  it('leaves the existing easy/standard/hard threshold values and defaultReps unchanged', () => {
+    // These are the exact tuned values the working MoveNet counting depends on.
+    expect(getPreset('pushup', 'easy')).toMatchObject({
+      downFraction: 0.12,
+      upFraction: 0.05,
+      defaultReps: 10,
+    });
+    expect(getPreset('pushup', 'standard')).toMatchObject({
+      downFraction: 0.16,
+      upFraction: 0.06,
+      defaultReps: 20,
+    });
+    expect(getPreset('pushup', 'hard')).toMatchObject({
+      downFraction: 0.22,
+      upFraction: 0.08,
+      defaultReps: 45,
+    });
+    expect(getPreset('situp', 'easy')).toMatchObject({
+      downAngle: 100,
+      upAngle: 140,
+      defaultReps: 10,
+    });
+    expect(getPreset('situp', 'standard')).toMatchObject({
+      downAngle: 90,
+      upAngle: 150,
+      defaultReps: 20,
+    });
+    expect(getPreset('situp', 'hard')).toMatchObject({
+      downAngle: 70,
+      upAngle: 160,
+      defaultReps: 30,
+    });
   });
 });
 

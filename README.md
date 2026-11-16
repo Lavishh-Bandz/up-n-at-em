@@ -13,10 +13,14 @@ It's a working demonstration of the idea you described: set an alarm, go to turn
 **What works today:**
 - A live camera view with a "skeleton" drawn over your body.
 - Real-time counting of push-ups and/or sit-ups.
-- Settings to choose the exercise(s), how many reps, and a difficulty (easy / standard / hard).
+- Settings to choose the exercise(s), how many reps, and a difficulty (easy / standard / hard / **extreme**).
 - Chaining multiple workouts in order (e.g. push-ups *then* sit-ups).
 - A looping alarm that will NOT stop until you finish the whole workout.
 - An emergency "hold-to-cancel" escape, for safety (more on that below).
+- A **difficulty + progressive-overload system**: your rep target grows a little each day, with controls to turn that off, dial it back down, and set your floor (see "Difficulty, progression & the daily target" below).
+- A **session timer** that measures and displays how long your workout took.
+- A **progress & consistency tracker**: your streak plus a history of completed days and reps over time.
+- Progress is **saved in your browser** (localStorage) so your streak and target survive a page refresh.
 
 **What's parked for later** (see the "Parked / not yet built" section at the bottom):
 - A real, native phone alarm that fires at 6:00 AM while your phone is locked.
@@ -102,9 +106,72 @@ Here's the friendly part: the countdown only runs *while you are in position*. I
 
 > **Camera placement for side-view push-ups.** This readiness check (and the counting itself) works best when the camera is set **low and to your side** so it can see your shoulder — and ideally your hip — roughly in profile as you go down. If the camera briefly loses tracking mid-set, the outlier validator (5b) filters the garbage frames so your rep tally is not thrown off; the set keeps counting once tracking recovers.
 
-**6. Difficulty changes the thresholds.** "Hard" demands a deeper range of motion (a bigger dip for a push-up, a tighter fold for a sit-up) and sets a higher default rep count, 45 push-ups for example. "Easy" is more forgiving. The presets live in [`src/logic/exercises.js`](src/logic/exercises.js) — sit-ups are tuned in degrees, push-ups in fractions of your body size.
+**6. Difficulty changes the thresholds.** "Hard" demands a deeper range of motion (a bigger dip for a push-up, a tighter fold for a sit-up) and sets a higher default rep count, 45 push-ups for example. "Easy" is more forgiving, and there's now an **"extreme"** level one notch past hard (the deepest dip / tightest fold and the most reps). The presets live in [`src/logic/exercises.js`](src/logic/exercises.js) — sit-ups are tuned in degrees, push-ups in fractions of your body size.
 
 **7. Multiple workouts chain in order.** If you set "45 push-ups then 30 sit-ups", the alarm only stops once *both* steps hit their targets, in order. That progression is tracked in [`src/logic/workoutQueue.js`](src/logic/workoutQueue.js).
+
+---
+
+## Difficulty, progression & the daily target
+
+The whole point of a daily alarm is to build a habit, so UP N AT EM now has a **progressive-overload** system: finish your workout and tomorrow's target is a little higher. How much higher depends on the difficulty you picked.
+
+**Daily increment by difficulty** (how many reps your target grows each day you finish, with auto-increase on):
+
+| Difficulty | Daily increase | Starting default reps (push-ups) |
+| ---------- | -------------- | -------------------------------- |
+| Easy       | **+1** per day | 10                               |
+| Standard   | **+2** per day | 20                               |
+| Hard       | **+3** per day | 45                               |
+| Extreme    | **+5** per day | 60                               |
+
+The target is **capped at 100 reps** — progressive overload can climb all the way up to 100 but never past it.
+
+**You stay in control.** Three settings on the home screen, all backed by your saved progress:
+
+- **"Automatically increase my reps each day"** — a toggle. Turn it **off** and your target simply *holds* at its current number each day instead of climbing. Turn it back on whenever you want to start ramping again.
+- **"Make it easier (-1)"** — a manual decrease. If the number crept up past what you can manage, drop it by one rep at a time. It will never go below your **starting target** (that's the floor), so the button disables once you're already sitting on it.
+- **Starting target** — the baseline you set, which is *also* the floor the target can never decay below. Raise it and your current target comes up to meet it; lower it and you've given yourself more room to dial back.
+
+**Missing days (the streak & decay rules).** Life happens, so missing a day is handled gently, and it matters *how many* days you miss. A "missed day" means a day you did **not** do (or deliberately skip) the workout. That count is measured from the last day you were actually **active** (completed or deliberately skipped a workout), **not** from the last time you merely opened the app, so simply launching the app every day without exercising does not keep your streak alive:
+
+- **Miss exactly one day:** your target **holds** and your streak **continues**. One slipped day costs you nothing. (Opening the app the day after a workout, or the next day with yesterday skipped, is still within this grace.)
+- **Miss two or more days:** your streak **resets to 0**, *and* your target **decays by 1 rep (flat) for each missed day** (not scaled to difficulty), floored at your starting target so it never drops below your baseline. So a longer absence eases you back in rather than throwing you straight back at a now-too-high number.
+
+Finishing a workout (or taking a deliberate skip) resets the clock the miss count is measured from, so a single skip holds for exactly one day and completing a workout starts a fresh grace window from that day.
+
+**Deliberate "Skip today" (and why it's separate from the emergency exit).** You can choose to take a rest day on purpose. On the settings screen there's a clearly labelled **press-and-HOLD "Skip today"** control: hold it for a couple of seconds and today is marked as a deliberate skip, which behaves exactly like *missing one day* — your target holds and your streak continues.
+
+This is deliberately **separate** from the mid-workout emergency exit, and that separation is the whole point. The emergency hold-to-cancel on the *workout* screen is a safety hatch that records **nothing** — no completion, no skip. If "skip today" were wired into that emergency exit, a panicked or accidental mid-workout bail-out could get logged as an intentional rest day, which is misleading. By giving "Skip today" its own calm, clearly-labelled hold on the settings screen, the *only* way to log a skip is to deliberately choose it, and an emergency exit can never be mistaken for one.
+
+**Where the rules live.** All of this is pure, fully unit-tested, and clock-free: the rules are in [`src/logic/progressStore.js`](src/logic/progressStore.js), the per-difficulty increments in [`src/logic/exercises.js`](src/logic/exercises.js). The pure core never reads the clock itself — the "what day is it?" read happens at the edge in [`src/hooks/useProgress.js`](src/hooks/useProgress.js) (and `App.jsx`), which hands the pure functions a plain `YYYY-MM-DD` day string.
+
+---
+
+## The session timer
+
+Every completed workout is **timed**. A small stopwatch starts the moment you finish getting into position for your first exercise (the "GO!" moment where counting actually begins) and stops the instant the whole workout is complete. On the success screen you'll see **"You finished in 1:23"**, and the time is saved into your history so you can watch it over the days.
+
+**v1 is MEASURE + DISPLAY + STORE only, on purpose.** Right now the timer just collects the data: it shows your time and records it, but it does **not** yet use time to decide whether your target holds or increases. That smart, time-and-effort-based auto-progression (e.g. "you finished way under your usual time, so bump the target more") is deliberately deferred to **v2**, which we'll design *from the real timing data this v1 collects* rather than guessing at it now. The timer is strictly observe-only: it never influences rep counting, arming, posture checks, or the progression rules. The stopwatch is the pure, time-injected `createSessionTimer` in [`src/logic/sessionTimer.js`](src/logic/sessionTimer.js).
+
+---
+
+## The progress & consistency tracker
+
+Open **"View your progress"** (from the settings screen or the success screen) to see how you're doing over time:
+
+- your **current streak** (days finished in a row),
+- your **current target(s)** and chosen difficulty for each exercise,
+- a **history of completed days** — the date, total reps, and how long it took (via the timer),
+- a minimal **reps-over-time** visualisation built from your history totals (lightweight inline bars — no charting library, to keep the bundle small).
+
+It's a read-only view: every number comes straight from your saved progress. The component is [`src/components/ProgressTracker.jsx`](src/components/ProgressTracker.jsx).
+
+---
+
+## Where your progress is saved
+
+Your streak, targets, settings and workout history are saved in your browser's **localStorage** under a single versioned key (`up-n-at-em:progress:v1`). That's the right choice for this **browser proof-of-concept**: it survives a page refresh with zero setup and no account. It is *per-browser*, so it won't follow you to another device, and clearing your browser data clears it. A proper, device-independent (and eventually native) store is a later milestone, exactly the same follow-up as the native 6 AM alarm below. All localStorage access is isolated to one tiny adapter, [`src/logic/storageAdapter.js`](src/logic/storageAdapter.js), so swapping in native storage later is a change to that one file.
 
 ---
 
@@ -200,18 +267,24 @@ up-n-at-em/
 │   │   ├── upperBodySignal.js   #   upper-body position + body-scale (push-ups)
 │   │   ├── repCounter.js        #   the angle-based down-then-up state machine (sit-ups)
 │   │   ├── verticalRepCounter.js #  the position-based down-then-up state machine (push-ups)
-│   │   ├── exercises.js         #   exercise + difficulty definitions
+│   │   ├── exercises.js         #   exercise + difficulty definitions (incl. daily increments)
 │   │   ├── workoutQueue.js      #   chaining multiple workouts in order
+│   │   ├── progressStore.js     #   pure, clock-free streak/progression/decay rules
+│   │   ├── sessionTimer.js      #   pure, time-injected workout stopwatch
+│   │   ├── storageAdapter.js    #   the ONLY place that touches localStorage
 │   │   └── __tests__/           #   Vitest tests for all of the above
 │   ├── hooks/
 │   │   ├── usePoseDetector.js  # loads MoveNet, runs the detection loop
+│   │   ├── useProgress.js      # thin React bridge over progressStore (reads the clock at the edge)
 │   │   └── useAlarm.js         # the looping Web Audio alarm tone
 │   └── components/
 │       ├── CameraView.jsx      # webcam + skeleton overlay
-│       ├── SettingsPanel.jsx   # build your workout
+│       ├── SettingsPanel.jsx   # build your workout + difficulty/progression + skip-today
 │       ├── ProgressHud.jsx     # live rep count + progress
+│       ├── ProgressTracker.jsx # streak + history + reps-over-time view
+│       ├── HoldButton.jsx      # reusable press-and-hold button (used by skip-today)
 │       ├── EmergencyExit.jsx   # the hold-to-cancel escape
-│       └── WorkoutSession.jsx  # wires the camera to the rep-counting logic
+│       └── WorkoutSession.jsx  # wires the camera to the rep-counting logic + session timer
 └── src/stubs/mediapipe-pose.js # small build shim (see below)
 ```
 
