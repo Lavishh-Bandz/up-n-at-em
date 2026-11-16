@@ -578,6 +578,181 @@ export function createPostureGuard(config = {}) {
 }
 
 // -----------------------------------------------------------------------------
+// READY-POSITION CHECK FOR THE ARMING COUNTDOWN (side-view friendly)
+// -----------------------------------------------------------------------------
+// WHY THIS EXISTS (the live bug the user reported):
+//   The 5-second "get into position" countdown advances whenever the frame is
+//   "confident", and for push-ups "confident" only means the chosen-side
+//   shoulder is visible and the outlier validator accepted the reading. So just
+//   STANDING in front of the camera armed the countdown. It should only count
+//   down once the user is genuinely DOWN in the push-up / ready position.
+//
+//   We cannot reuse isPushupPosture directly for this, for two reasons:
+//     1. isPushupPosture FAILS OPEN (returns true when it cannot tell) so a
+//        missing keypoint never blocks a counted rep. That is right for the rep
+//        counter, but exactly WRONG for arming: for arming we want the opposite,
+//        "if we are not sure you are down, do NOT start the countdown".
+//     2. The user films from the SIDE, and side-on the single strongest cue in
+//        isPushupPosture (nose-high-above-shoulder) is weak.
+//
+//   So this is a SEPARATE, PURPOSE-BUILT check for the arming gate only. It is
+//   used in addition to (not instead of) the per-frame confidence + validator,
+//   and it FAILS TOWARD NOT ARMING: when it cannot positively confirm a ready
+//   position it returns false, so the countdown pauses rather than arming on a
+//   standing body. It never gates the rep counter, so it cannot strand earned
+//   reps once the set is armed.
+//
+// THE CUES (each works side-on, listed strongest-first):
+//
+//   CUE LEVEL — TORSO IS ROUGHLY HORIZONTAL (strongest, needs the hip):
+//     In a real side-view push-up / plank the shoulder and hip sit at nearly
+//     the SAME height (the torso is near-level with the floor), so the VERTICAL
+//     gap between shoulder and hip is a SMALL fraction of the body-scale. When
+//     standing, the shoulder is stacked high ABOVE the hip, so that vertical gap
+//     is a LARGE fraction of body-scale. When the chosen-side hip is visible we
+//     use this directly: a small shoulder-to-hip vertical gap = ready; a large
+//     one = standing. This is the cleanest side-on separator, so when the hip is
+//     present it decides on its own.
+//
+//   CUE PLANTED — WRISTS ON THE FLOOR (strong, needs both wrists):
+//     Same idea as isPushupPosture CUE A, but used here as a POSITIVE readiness
+//     signal: if both wrists are confidently visible and planted at/below the
+//     shoulder line, the hands are on the floor -> ready.
+//
+//   CUE HEAD — HEAD NEAR SHOULDER HEIGHT (fallback, needs the nose):
+//     When the hip and wrists are not available (common side-on), fall back to
+//     the head height. Down in a push-up the head drops to near shoulder level,
+//     so the nose sits only a small fraction of body-scale above (or even below)
+//     the shoulder. Standing tall, the nose sits far ABOVE the shoulder. We only
+//     treat this as READY when the gap is clearly SMALL (a tighter threshold
+//     than isPushupPosture's reject threshold), so a borderline standing frame
+//     does not arm.
+//
+// DECISION (fails toward NOT ready):
+//   - No usable body-scale or no shoulder anchor -> NOT ready (false).
+//   - Hip visible -> ready IFF the shoulder-to-hip vertical gap is small.
+//   - Else both wrists visible+planted -> ready.
+//   - Else nose visible and clearly near shoulder height -> ready.
+//   - Otherwise -> NOT ready (we could not positively confirm a down position).
+
+/**
+ * Default tuning for the ready-position (arming) check. Fractions of the
+ * body-scale unless noted. Exposed so exercises.js can place it on the push-up
+ * descriptor and the user can tune it live via the debug readout.
+ */
+export const DEFAULT_READY_CONFIG = {
+  // CUE LEVEL: the shoulder-to-hip VERTICAL gap (as a fraction of body-scale)
+  // must be at or under this for the torso to read as "roughly horizontal"
+  // (down in a plank). Standing stacks the shoulder ~a full body-scale above
+  // the hip, so a small value here cleanly separates the two. 0.5 = the torso
+  // is more level than upright.
+  maxShoulderHipVerticalFraction: 0.5,
+  // CUE PLANTED: how far BELOW the shoulder (fraction of body-scale) both wrists
+  // must sit to read as planted on the floor. Matches the posture guard.
+  wristPlantedMargin: 0.15,
+  // Confidence a wrist / hip must clear before we trust it for a cue.
+  jointMinConfidence: 0.3,
+  // CUE HEAD: the nose may sit at most this fraction of a body-scale ABOVE the
+  // shoulder to read as "head near shoulder height" (down). This is TIGHTER
+  // than isPushupPosture's reject threshold (0.6) on purpose: for arming we
+  // want a clear, confident "you are down" before we start the countdown, not
+  // merely "you are not obviously standing".
+  maxNoseAboveFraction: 0.35,
+};
+
+/**
+ * Decide whether THIS frame positively looks like a genuine push-up READY /
+ * down position, for the purpose of advancing the arming countdown.
+ *
+ * Unlike isPushupPosture (which fails OPEN so it never blocks a counted rep),
+ * this FAILS TOWARD NOT READY: if it cannot positively confirm a down position
+ * it returns false, so the countdown pauses instead of arming on a standing
+ * body. See the big comment above for the per-cue rationale.
+ *
+ * Pure function: keypoints in, true/false out. No DOM, no timers.
+ *
+ * @param {object} keypointsByName  Map of MoveNet keypoints keyed by name.
+ * @param {'left'|'right'} side     Which side's shoulder/hip/wrist to read.
+ * @param {number} bodyScalePx      The body-scale ruler (pixels) for this frame.
+ * @param {object} [config]         Tuning (see DEFAULT_READY_CONFIG).
+ * @returns {boolean} true only if the frame positively looks like a ready
+ *                    push-up position; false otherwise (including "not sure").
+ */
+export function isReadyForArming(
+  keypointsByName,
+  side,
+  bodyScalePx,
+  config = DEFAULT_READY_CONFIG
+) {
+  // Without a usable ruler we cannot judge any body-relative cue -> NOT ready.
+  if (!keypointsByName || typeof bodyScalePx !== 'number' || bodyScalePx <= 0) {
+    return false;
+  }
+
+  const cfg = { ...DEFAULT_READY_CONFIG, ...config };
+
+  const shoulder =
+    side === 'right'
+      ? keypointsByName.right_shoulder
+      : keypointsByName.left_shoulder;
+
+  // No shoulder anchor -> nothing to compare against -> NOT ready.
+  if (!shoulder || typeof shoulder.y !== 'number') {
+    return false;
+  }
+
+  // CUE LEVEL (strongest, side-on): if the chosen-side hip is confidently
+  // visible, decide purely on the shoulder-to-hip VERTICAL gap. A small gap =
+  // torso roughly horizontal = down in a plank = ready. A large gap = shoulder
+  // stacked above hip = standing = not ready.
+  const hip =
+    side === 'right' ? keypointsByName.right_hip : keypointsByName.left_hip;
+  const hipSeen =
+    hip &&
+    typeof hip.y === 'number' &&
+    typeof hip.score === 'number' &&
+    hip.score >= cfg.jointMinConfidence;
+  if (hipSeen) {
+    const verticalGap = Math.abs(shoulder.y - hip.y) / bodyScalePx;
+    return verticalGap <= cfg.maxShoulderHipVerticalFraction;
+  }
+
+  // CUE PLANTED: both wrists confidently visible and planted at/below the
+  // shoulder line -> hands on the floor -> ready.
+  const leftWrist = keypointsByName.left_wrist;
+  const rightWrist = keypointsByName.right_wrist;
+  const leftWristSeen =
+    leftWrist &&
+    typeof leftWrist.y === 'number' &&
+    typeof leftWrist.score === 'number' &&
+    leftWrist.score >= cfg.jointMinConfidence;
+  const rightWristSeen =
+    rightWrist &&
+    typeof rightWrist.y === 'number' &&
+    typeof rightWrist.score === 'number' &&
+    rightWrist.score >= cfg.jointMinConfidence;
+  if (leftWristSeen && rightWristSeen) {
+    const leftPlanted =
+      (leftWrist.y - shoulder.y) / bodyScalePx >= cfg.wristPlantedMargin;
+    const rightPlanted =
+      (rightWrist.y - shoulder.y) / bodyScalePx >= cfg.wristPlantedMargin;
+    return leftPlanted && rightPlanted;
+  }
+
+  // CUE HEAD (fallback): the head must be CLEARLY near shoulder height. The nose
+  // sits at most maxNoseAboveFraction of a body-scale ABOVE the shoulder (y
+  // grows downward, so "above" = smaller y). A big gap means standing tall.
+  const nose = keypointsByName.nose;
+  if (nose && typeof nose.y === 'number') {
+    const noseAboveFraction = (shoulder.y - nose.y) / bodyScalePx;
+    return noseAboveFraction <= cfg.maxNoseAboveFraction;
+  }
+
+  // Nothing let us positively confirm a down position -> fail toward NOT ready.
+  return false;
+}
+
+// -----------------------------------------------------------------------------
 // STABLE BODY-SCALE RULER
 // -----------------------------------------------------------------------------
 // WHY A LOCKED RULER BEATS A PER-FRAME ONE (the second live bug):

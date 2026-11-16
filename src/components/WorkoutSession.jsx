@@ -32,6 +32,7 @@ import {
   createBodyScaleTracker,
   createPostureGuard,
   createUpperBodySignalValidator,
+  isReadyForArming,
 } from '../logic/upperBodySignal.js';
 import { createPositionGate } from '../logic/positionGate.js';
 import { createStatusDebouncer } from '../logic/statusDebounce.js';
@@ -328,6 +329,12 @@ export default function WorkoutSession({
     let pushupRejectReason = null; // short tag for the debug readout when rejected
     let pushupCurrentY = null; // the plausible y (reused by the counting path below)
     let pushupScale = null; // the ruler used this frame (reused below)
+    // READY-POSITION flag for the ARMING countdown (push-ups only). true for
+    // sit-ups so their arming path is unchanged. For push-ups this becomes
+    // false while the user is STANDING, which pauses the get-into-position
+    // countdown (see the positionGate call below). It does NOT gate the rep
+    // counter, so it can never strand earned reps once a set is armed.
+    let pushupReadyForArming = true;
     if (step.exercise === 'pushup') {
       pushupCurrentY = measureUpperBodyY(keypoints, side);
       // Prefer the locked ruler once armed; during arming fall back to the live
@@ -344,6 +351,16 @@ export default function WorkoutSession({
       );
       pushupFrameValid = verdict.ok;
       pushupRejectReason = verdict.reason;
+      // Does THIS frame positively look like a genuine down/ready push-up
+      // position? Side-view friendly and fails toward NOT ready, so a standing
+      // body returns false and the countdown pauses instead of arming. We use
+      // the SAME ruler the validator/counter use so every cue agrees.
+      pushupReadyForArming = isReadyForArming(
+        keypoints,
+        side,
+        pushupScale,
+        getExercise('pushup').readyGuard
+      );
     }
 
     // The per-frame "trust this frame" flag. For push-ups a rejected outlier
@@ -370,15 +387,26 @@ export default function WorkoutSession({
     //     already rejects bad reps, so there is no need to disarm. We only ever
     //     re-arm from scratch when a NEW step begins (see step advance below).
     const wasArmed = lastArmedRef.current;
+    // What the ARMING countdown is fed. It is NOT the same as isConfident: on
+    // top of "the frame is trustworthy" we also require, for PUSH-UPS, that the
+    // frame positively looks like a genuine down/ready position (side-view
+    // friendly, fails toward NOT ready). So merely STANDING in front of the
+    // camera no longer ticks the countdown down — the user has to actually be
+    // down in the push-up position. For sit-ups pushupReadyForArming stays true,
+    // so their arming is unchanged. positionGate pauses/decays on a false frame
+    // (we do not touch positionGate's internals), so a standing frame pauses the
+    // countdown exactly like a not-confident frame. The REP COUNTER below still
+    // uses isConfident + postureOk, so this readiness gate never strands reps.
+    const armingReady = isConfident && pushupReadyForArming;
     const { armed: isArmed, heldMs, remainingSeconds } =
-      positionGateRef.current.update(isConfident, nowMs);
+      positionGateRef.current.update(armingReady, nowMs);
 
     // PUSH-UP ONLY: while the step is still arming, feed the STABLE ruler the
     // live body-scale each CONFIDENT frame so it builds a steady baseline from
     // the user holding the top position during the 5s countdown. We do this
     // BEFORE the not-armed early-return so the ruler is ready to lock the
     // instant the step arms. (This does not change the gate timing at all.)
-    if (step.exercise === 'pushup' && !isArmed && isConfident) {
+    if (step.exercise === 'pushup' && !isArmed && armingReady) {
       const armingScale = measureBodyScale(keypoints);
       if (armingScale != null) {
         bodyScaleTrackerRef.current.push(armingScale, true);
@@ -426,7 +454,11 @@ export default function WorkoutSession({
       // the reason — and confirm the countdown is only advancing when genuinely
       // in position.
       updateCountdownSeconds(remainingSeconds);
-      updatePaused(heldMs > 0 && !isConfident);
+      // Paused = we have banked some hold time but the current frame is NOT
+      // advancing the countdown. For push-ups that now includes a STANDING
+      // frame (armingReady false), so the HUD tells the user to get back DOWN
+      // into position rather than silently stalling.
+      updatePaused(heldMs > 0 && !armingReady);
       if (step.exercise === 'pushup') {
         const armingReadout = {
           excursion: null,
@@ -440,6 +472,12 @@ export default function WorkoutSession({
           armed: false,
           phase: 'arming',
           postureOk: null,
+          // NEW: is the user in a genuine ready/down position RIGHT NOW? This is
+          // what decides whether the countdown advances this frame. The user can
+          // watch this flip to false while standing (countdown pauses) and true
+          // once they are down (countdown advances), so the behaviour is visible
+          // and tunable from real data.
+          ready: pushupReadyForArming,
           // The headline for the ready-position phase: was this frame's reading
           // rejected as an outlier, and why? A rejected frame does NOT tick the
           // countdown (it dropped isConfident to false above).
@@ -514,6 +552,9 @@ export default function WorkoutSession({
         armed: isArmed,
         phase: dbg.phase,
         postureOk,
+        // Once armed we are past the arming gate, so readiness is no longer the
+        // thing being decided; we report true for a consistent readout shape.
+        ready: true,
         // Surface whether this frame's reading was REJECTED as an outlier so the
         // user can watch the garbage being filtered live. A rejected frame
         // still reaches this debug block (it has a real, if teleporting, y), but

@@ -62,7 +62,10 @@
 //   side the camera can see more confidently (see pickBetterSide below).
 
 import { isBodyHorizontal } from './angles.js';
-import { DEFAULT_POSTURE_CONFIG } from './upperBodySignal.js';
+import {
+  DEFAULT_POSTURE_CONFIG,
+  DEFAULT_READY_CONFIG,
+} from './upperBodySignal.js';
 
 /**
  * PUSH-UP (position-based; see header)
@@ -105,6 +108,16 @@ export const EXERCISES = {
     postureGuard: {
       ...DEFAULT_POSTURE_CONFIG,
       wristStationaryFraction: 0.2,
+    },
+    // READY-POSITION GUARD CONFIG (pure data, easy to find + tune live).
+    // Feeds isReadyForArming in upperBodySignal.js, which gates the 5-second
+    // get-into-position COUNTDOWN (not the rep counter) so the countdown only
+    // advances when the user is genuinely DOWN in the push-up / ready position,
+    // not merely standing in front of the camera. Side-view friendly and fails
+    // toward NOT arming. STARTING values meant to be nudged live via the debug
+    // readout (the readout now shows a 'ready' flag during arming).
+    readyGuard: {
+      ...DEFAULT_READY_CONFIG,
     },
     // SUSTAINED-DIP requirement for the vertical rep counter. A real push-up dip
     // spans several camera frames, so we require the body to STAY past the down

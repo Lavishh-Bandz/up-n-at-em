@@ -275,6 +275,21 @@ describe('push-up anti-cheat: upper-body requirements', () => {
     expect(EXERCISES.situp.postureGuard).toBeUndefined();
   });
 
+  it('carries ready-position (arming) guard config as pure data on the descriptor', () => {
+    // The ready-position guard gates the 5-second get-into-position COUNTDOWN
+    // so it only advances when the user is genuinely down in position. It lives
+    // on the push-up descriptor as pure data so it is easy to find + tune live.
+    const guard = EXERCISES.pushup.readyGuard;
+    expect(guard).toBeTruthy();
+    expect(typeof guard.maxShoulderHipVerticalFraction).toBe('number');
+    expect(guard.maxShoulderHipVerticalFraction).toBeGreaterThan(0);
+    expect(typeof guard.maxNoseAboveFraction).toBe('number');
+    expect(guard.maxNoseAboveFraction).toBeGreaterThan(0);
+    expect(typeof guard.wristPlantedMargin).toBe('number');
+    // Sit-ups do not carry a push-up ready guard.
+    expect(EXERCISES.situp.readyGuard).toBeUndefined();
+  });
+
   it('uses reachable STARTING downFractions a genuine push-up can cross', () => {
     // Root-cause #3: the old 0.25/0.35/0.45 were too deep for a compressed
     // front/low webcam angle. Starting values must be shallower (but still a

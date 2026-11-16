@@ -6,8 +6,10 @@ import {
   createPostureGuard,
   createBodyScaleTracker,
   createUpperBodySignalValidator,
+  isReadyForArming,
   DEFAULT_POSTURE_CONFIG,
   DEFAULT_SIGNAL_VALIDATOR_CONFIG,
+  DEFAULT_READY_CONFIG,
 } from '../upperBodySignal.js';
 
 // Small helper to build a keypoint quickly.
@@ -396,5 +398,128 @@ describe('createUpperBodySignalValidator (rejects garbage MoveNet frames)', () =
     expect(typeof DEFAULT_SIGNAL_VALIDATOR_CONFIG.maxJumpFraction).toBe('number');
     expect(DEFAULT_SIGNAL_VALIDATOR_CONFIG.maxJumpFraction).toBeGreaterThan(0);
     expect(typeof DEFAULT_SIGNAL_VALIDATOR_CONFIG.maxPlausibleY).toBe('number');
+  });
+});
+
+describe('isReadyForArming (gates the get-into-position countdown, side-view)', () => {
+  // 100px body-scale ruler keeps fractions easy (0.5 of scale = 50px).
+  const READY_SCALE = 100;
+
+  // --- CUE LEVEL: shoulder-to-hip vertical gap (the strong side-on cue) ---
+
+  it('is READY for a side-view DOWN position: shoulder and hip roughly level', () => {
+    // Side-on plank: shoulder and hip at nearly the same height (torso near
+    // horizontal). Here the shoulder is at y=300 and the hip at y=320, a 20px
+    // (0.2 of scale) vertical gap -> well under 0.5 -> ready.
+    const down = {
+      left_shoulder: kp(200, 300),
+      left_hip: kp(120, 320),
+    };
+    expect(isReadyForArming(down, 'left', READY_SCALE)).toBe(true);
+  });
+
+  it('is NOT READY while STANDING side-on: shoulder stacked high above the hip', () => {
+    // Standing: the shoulder sits a full body-scale ABOVE the hip (shoulder
+    // y=200, hip y=300 -> 100px = 1.0 of scale vertical gap) -> not ready, so
+    // the countdown would NOT advance. This is the exact bug the user hit.
+    const standing = {
+      left_shoulder: kp(200, 200),
+      left_hip: kp(205, 300),
+    };
+    expect(isReadyForArming(standing, 'left', READY_SCALE)).toBe(false);
+  });
+
+  it('uses the chosen side hip for the level cue (right side)', () => {
+    const downRight = {
+      right_shoulder: kp(200, 300),
+      right_hip: kp(120, 315),
+    };
+    expect(isReadyForArming(downRight, 'right', READY_SCALE)).toBe(true);
+  });
+
+  it('ignores a LOW-CONFIDENCE hip and falls back to the next cue', () => {
+    // Hip present but too low-confidence to trust: with no wrists and a nose
+    // far above the shoulder (standing head), we must NOT arm.
+    const standingNose = {
+      left_shoulder: kp(200, 300),
+      left_hip: kp(205, 400, 0.1), // low score -> not trusted
+      nose: kp(200, 240), // 60px above shoulder = 0.6 of scale -> standing
+    };
+    expect(isReadyForArming(standingNose, 'left', READY_SCALE)).toBe(false);
+  });
+
+  // --- CUE PLANTED: wrists on the floor when the hip is not available ---
+
+  it('is READY on PLANTED wrists when the hip is not visible', () => {
+    // No hip (common side-on), but both wrists are confidently planted BELOW
+    // the shoulder line (hands on the floor) -> ready.
+    const planted = {
+      left_shoulder: kp(200, 300),
+      left_wrist: kp(180, 330), // 30px below (0.3 of scale) -> planted
+      right_wrist: kp(220, 330),
+    };
+    expect(isReadyForArming(planted, 'left', READY_SCALE)).toBe(true);
+  });
+
+  it('is NOT READY when visible wrists are ABOVE the shoulder (hands not planted)', () => {
+    const handsUp = {
+      left_shoulder: kp(200, 300),
+      left_wrist: kp(180, 260), // ABOVE the shoulder -> not planted
+      right_wrist: kp(220, 260),
+    };
+    expect(isReadyForArming(handsUp, 'left', READY_SCALE)).toBe(false);
+  });
+
+  // --- CUE HEAD: nose near shoulder height (last-resort fallback) ---
+
+  it('is READY on the head cue: nose near shoulder height, no hip/wrists', () => {
+    // Only shoulder + nose. Head has dropped to near shoulder level (10px above
+    // = 0.1 of scale, under the 0.35 ready threshold) -> ready.
+    const headDown = {
+      left_shoulder: kp(200, 300),
+      nose: kp(210, 290),
+    };
+    expect(isReadyForArming(headDown, 'left', READY_SCALE)).toBe(true);
+  });
+
+  it('is NOT READY on the head cue when the nose sits well above the shoulder', () => {
+    // Head is up (40px above = 0.4 of scale > the 0.35 ready threshold). This is
+    // TIGHTER than isPushupPosture, which would still pass this (its reject
+    // threshold is 0.6) -> proves the arming check is stricter about "down".
+    const headUp = {
+      left_shoulder: kp(200, 300),
+      nose: kp(210, 260),
+    };
+    expect(isReadyForArming(headUp, 'left', READY_SCALE)).toBe(false);
+  });
+
+  // --- FAIL TOWARD NOT ARMING (the key behaviour change) ---
+
+  it('FAILS TOWARD NOT READY when it cannot tell (opposite of isPushupPosture)', () => {
+    // Only a shoulder: no hip, no wrists, no nose. isPushupPosture fails OPEN
+    // (true) here so it never blocks a counted rep; the arming check must do the
+    // OPPOSITE and fail toward NOT ready so a bare shoulder cannot arm.
+    const bare = { left_shoulder: kp(200, 300) };
+    expect(isPushupPosture(bare, 'left', READY_SCALE)).toBe(true);
+    expect(isReadyForArming(bare, 'left', READY_SCALE)).toBe(false);
+
+    // No ruler, no keypoints, missing shoulder -> all NOT ready.
+    expect(isReadyForArming(bare, 'left', 0)).toBe(false);
+    expect(isReadyForArming(null, 'left', READY_SCALE)).toBe(false);
+    expect(isReadyForArming({}, 'left', READY_SCALE)).toBe(false);
+    expect(isReadyForArming({ nose: kp(200, 200) }, 'left', READY_SCALE)).toBe(
+      false
+    );
+  });
+
+  it('exposes tunable default ready config', () => {
+    expect(typeof DEFAULT_READY_CONFIG.maxShoulderHipVerticalFraction).toBe(
+      'number'
+    );
+    expect(DEFAULT_READY_CONFIG.maxShoulderHipVerticalFraction).toBeGreaterThan(
+      0
+    );
+    expect(typeof DEFAULT_READY_CONFIG.maxNoseAboveFraction).toBe('number');
+    expect(typeof DEFAULT_READY_CONFIG.wristPlantedMargin).toBe('number');
   });
 });

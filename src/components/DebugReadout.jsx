@@ -52,6 +52,7 @@ export default function DebugReadout({ debug, report }) {
     armed,
     phase,
     postureOk,
+    ready, // during arming: is the user in a genuine ready/down position now?
     rejected, // was this frame's reading thrown out as a detector outlier?
     rejectReason, // why ('negative' / 'out-of-frame' / 'teleport' / 'invalid')
     reps,
@@ -82,6 +83,11 @@ export default function DebugReadout({ debug, report }) {
       </div>
       <div className="debug-line">confident: {confident ? 'yes' : 'no'}</div>
       <div className="debug-line">armed: {armed ? 'yes' : 'no'}</div>
+      {!armed && (
+        <div className="debug-line">
+          ready: {ready ? 'yes (counting down)' : 'no (standing — paused)'}
+        </div>
+      )}
       <div className="debug-line">phase: {phase ?? '—'}</div>
       <div className="debug-line">
         posture: {postureOk ? 'ok' : 'standing'}
