@@ -172,10 +172,29 @@ export const EXERCISES = {
       //   the anti-standing guard are what keep a small standing bob from
       //   crossing these. upFraction stays a comfortable margin BELOW
       //   downFraction so the hysteresis band still swallows resting jitter.
-      easy: { downFraction: 0.12, upFraction: 0.05, defaultReps: 10 },
-      standard: { downFraction: 0.16, upFraction: 0.06, defaultReps: 20 },
+      //
+      // dailyIncrement = how many reps the daily "progressive overload" bump
+      // adds to your target when you finish a day with auto-increase ON. It
+      // lives RIGHT HERE on each preset (not off in some other file) so the one
+      // place you read a difficulty also tells you how fast it ramps:
+      //   easy +1, standard +2, hard +3, extreme +5.
+      // The progression/streak core (progressStore) reads it through the
+      // getDailyIncrement() helper below so it never has to reach inside these
+      // objects itself. All existing threshold fields below are UNCHANGED — we
+      // only added the dailyIncrement number to each row.
+      easy: { downFraction: 0.12, upFraction: 0.05, defaultReps: 10, dailyIncrement: 1 },
+      standard: { downFraction: 0.16, upFraction: 0.06, defaultReps: 20, dailyIncrement: 2 },
       // Harder = deeper dip + more reps.
-      hard: { downFraction: 0.22, upFraction: 0.08, defaultReps: 45 },
+      hard: { downFraction: 0.22, upFraction: 0.08, defaultReps: 45, dailyIncrement: 3 },
+      // EXTREME: one notch harder than 'hard', in the SAME direction as the
+      // easy -> standard -> hard progression. The required dip is deeper
+      // (downFraction 0.25, the deepest we start at — still reachable on a
+      // compressed webcam angle, matching the "reachable starting values"
+      // tuning the other rows follow) and the up threshold rises to 0.10 to
+      // match, while staying comfortably BELOW downFraction so the hysteresis
+      // band (upFraction < downFraction) still swallows resting jitter. More
+      // reps (60) and the biggest daily bump (+5).
+      extreme: { downFraction: 0.25, upFraction: 0.1, defaultReps: 60, dailyIncrement: 5 },
     },
   },
 
@@ -202,15 +221,29 @@ export const EXERCISES = {
       },
     },
     difficulties: {
-      easy: { downAngle: 100, upAngle: 140, defaultReps: 10 },
-      standard: { downAngle: 90, upAngle: 150, defaultReps: 20 },
-      hard: { downAngle: 70, upAngle: 160, defaultReps: 30 },
+      // dailyIncrement works exactly like the push-up one above: it is how many
+      // reps the daily progressive-overload bump adds (easy +1, standard +2,
+      // hard +3, extreme +5), read via getDailyIncrement() below. The angle
+      // thresholds and defaultReps for easy/standard/hard are UNCHANGED; we only
+      // added dailyIncrement to each row and the new 'extreme' row.
+      easy: { downAngle: 100, upAngle: 140, defaultReps: 10, dailyIncrement: 1 },
+      standard: { downAngle: 90, upAngle: 150, defaultReps: 20, dailyIncrement: 2 },
+      hard: { downAngle: 70, upAngle: 160, defaultReps: 30, dailyIncrement: 3 },
+      // EXTREME: a tighter fold than 'hard', continuing the same direction. For
+      // sit-ups "harder" means a SMALLER downAngle (you must curl further up) and
+      // a LARGER upAngle (you must lie back flatter at the bottom). downAngle 60
+      // is below hard's 70 and upAngle 165 is above hard's 160, so the hysteresis
+      // invariant downAngle < upAngle still holds. More reps (40) and +5 a day.
+      extreme: { downAngle: 60, upAngle: 165, defaultReps: 40, dailyIncrement: 5 },
     },
   },
 };
 
-/** The difficulty levels, ordered from easiest to hardest. */
-export const DIFFICULTIES = ['easy', 'standard', 'hard'];
+// The difficulty levels, ordered from easiest to hardest. 'extreme' goes LAST
+// so this order stays easiest -> hardest; the settings UI shows them in exactly
+// this sequence. Adding it at the end (not the middle) means nothing that walks
+// the list top-to-bottom changes behavior for the existing three.
+export const DIFFICULTIES = ['easy', 'standard', 'hard', 'extreme'];
 
 /**
  * Look up an exercise descriptor by id.
@@ -231,13 +264,17 @@ export function getExercise(exerciseId) {
  *   - sit-ups return { downAngle, upAngle, defaultReps } (fed to createRepCounter)
  *   - push-ups return { downFraction, upFraction, defaultReps } (fed to
  *     createVerticalRepCounter — body-scale fractions, not angles)
- * In both cases defaultReps is just the suggested rep count. This helper only
- * looks the object up and hands it back; it does not care which shape it is.
+ * In both cases defaultReps is just the suggested rep count, and every preset
+ * now also carries a dailyIncrement (how many reps the daily progressive-overload
+ * bump adds for that difficulty: easy 1, standard 2, hard 3, extreme 5). This
+ * helper only looks the object up and hands it back; it does not care which
+ * shape it is. Prefer getDailyIncrement() below if you only need the increment,
+ * so callers do not have to reach into the preset shape themselves.
  *
  * @param {('pushup'|'situp')} exerciseId
- * @param {('easy'|'standard'|'hard')} difficulty
- * @returns {({downAngle:number, upAngle:number, defaultReps:number}
- *          | {downFraction:number, upFraction:number, defaultReps:number})}
+ * @param {('easy'|'standard'|'hard'|'extreme')} difficulty
+ * @returns {({downAngle:number, upAngle:number, defaultReps:number, dailyIncrement:number}
+ *          | {downFraction:number, upFraction:number, defaultReps:number, dailyIncrement:number})}
  */
 export function getPreset(exerciseId, difficulty) {
   const exercise = getExercise(exerciseId);
@@ -246,6 +283,27 @@ export function getPreset(exerciseId, difficulty) {
     throw new Error(`Unknown difficulty "${difficulty}" for exercise "${exerciseId}"`);
   }
   return preset;
+}
+
+/**
+ * Get the per-difficulty DAILY INCREMENT: how many reps the daily
+ * progressive-overload bump adds to your target when you finish a day with
+ * auto-increase turned on (easy 1, standard 2, hard 3, extreme 5).
+ *
+ * WHY a dedicated helper: the progression/streak core (progressStore) only
+ * needs this one number, and we do not want it reaching into the preset's
+ * internals (downFraction/downAngle/etc.) just to read it. Keeping the lookup
+ * here means the increment and the thresholds stay defined in one place.
+ *
+ * This is a thin pure wrapper over getPreset, so it throws the same way on an
+ * unknown exercise or difficulty.
+ *
+ * @param {('pushup'|'situp')} exerciseId
+ * @param {('easy'|'standard'|'hard'|'extreme')} difficulty
+ * @returns {number} the reps-per-day increment for that difficulty
+ */
+export function getDailyIncrement(exerciseId, difficulty) {
+  return getPreset(exerciseId, difficulty).dailyIncrement;
 }
 
 /**
