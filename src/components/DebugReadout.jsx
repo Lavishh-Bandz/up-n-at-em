@@ -5,15 +5,6 @@
 // frame, so the user can read them back to us and we can tune the thresholds
 // from real data instead of guessing.
 //
-// Push-ups are counted from the 3D ELBOW JOINT ANGLE (shoulder -> elbow ->
-// wrist, in degrees) through an up/down state machine, so this panel shows the
-// live elbow angle next to the two angle thresholds it is working between: the
-// user bends the elbow PAST the "down" threshold (angle <= downAngle) to reach
-// the bottom of a push-up, then straightens PAST the "up" threshold
-// (angle >= upAngle) to complete the rep. Showing the live angle and both
-// thresholds side by side makes it obvious at a glance whether a real push-up
-// is actually moving the angle far enough.
-//
 // It is a "dumb" presentational component. WorkoutSession owns the per-frame
 // pipeline and feeds this component THROTTLED values via `debug` (updated only a
 // few times a second, behind guarded change-checks) so this panel can never
@@ -27,19 +18,18 @@
 import { useState } from 'react';
 
 // Format a number for display, showing a dash for missing values.
-function fmt(n, decimals = 1) {
+function fmt(n, decimals = 3) {
   if (typeof n !== 'number' || !Number.isFinite(n)) {
     return '—';
   }
   return n.toFixed(decimals);
 }
 
-// Format an angle in degrees (e.g. "132°"), dash for missing values.
-function fmtDeg(n) {
+function fmtPx(n) {
   if (typeof n !== 'number' || !Number.isFinite(n)) {
     return '—';
   }
-  return `${n.toFixed(0)}°`;
+  return `${Math.round(n)}px`;
 }
 
 export default function DebugReadout({ debug, report }) {
@@ -51,10 +41,13 @@ export default function DebugReadout({ debug, report }) {
   }
 
   const {
-    angle, // smoothed elbow angle (degrees) the counter actually saw this frame
-    rawAngle, // pre-smoothing elbow angle (for comparison)
-    downAngle, // bend PAST this (angle <= downAngle) to reach the bottom
-    upAngle, // straighten PAST this (angle >= upAngle) to complete the rep
+    excursion, // smoothed dip the counter actually saw this frame
+    rawExcursion, // pre-smoothing dip (for comparison)
+    downFraction, // the threshold the dip must reach to go 'down'
+    upFraction, // the threshold it must rise back past to complete a rep
+    bodyScalePx, // the ruler actually used (locked once armed)
+    bodyScaleLocked,
+    upperBodyY, // raw upper-body y (pixels)
     confident,
     armed,
     phase,
@@ -64,20 +57,19 @@ export default function DebugReadout({ debug, report }) {
 
   return (
     <div className="debug-readout" aria-label="Detector debug readout">
-      <div className="debug-readout-title">Detector debug (elbow angle)</div>
+      <div className="debug-readout-title">Detector debug</div>
 
-      {/* The single most important line: the live elbow angle in degrees. For a
-          rep, the angle must bend DOWN past downAngle, then rise UP past
-          upAngle. */}
       <div className="debug-line">
-        elbow angle (smoothed): <strong>{fmtDeg(angle)}</strong>
+        dip (smoothed): <strong>{fmt(excursion)}</strong> / need{' '}
+        {fmt(downFraction, 2)}
       </div>
-      <div className="debug-line">raw elbow angle: {fmtDeg(rawAngle)}</div>
-      {/* Show the angle next to BOTH thresholds so it is obvious whether a real
-          push-up is moving it far enough in each direction. */}
+      <div className="debug-line">raw dip: {fmt(rawExcursion)}</div>
+      <div className="debug-line">up threshold: {fmt(upFraction, 2)}</div>
       <div className="debug-line">
-        down ≤ {fmt(downAngle, 0)}° · up ≥ {fmt(upAngle, 0)}°
+        bodyScale: {fmtPx(bodyScalePx)}{' '}
+        {bodyScaleLocked ? '(locked)' : '(live)'}
       </div>
+      <div className="debug-line">upperY: {fmtPx(upperBodyY)}</div>
       <div className="debug-line">confident: {confident ? 'yes' : 'no'}</div>
       <div className="debug-line">armed: {armed ? 'yes' : 'no'}</div>
       <div className="debug-line">phase: {phase ?? '—'}</div>

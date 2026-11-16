@@ -8,16 +8,6 @@
 // read this back off the screen (or copy the JSON from the browser console) so
 // we can tune the thresholds from REAL data instead of guessing.
 //
-// WHAT THE NUMBERS ARE NOW: push-ups are counted from the 3D ELBOW JOINT ANGLE
-// (shoulder -> elbow -> wrist, in degrees) run through an up/down state machine.
-// So each sample records the SMOOTHED elbow angle this frame next to the
-// down/up ANGLE thresholds it is aiming for: bend the elbow PAST downAngle
-// (angle <= downAngle) to reach the bottom, then straighten PAST upAngle
-// (angle >= upAngle) to complete the rep. If a real rep never bends the angle
-// past downAngle, the copied report shows it (summary.downAngleReached === false
-// and a minAngle that never dropped to downAngle), which tells us the threshold
-// is set too shallow for how this camera sees the user.
-//
 // This module is PURE: no React, no DOM, no timers, no Date.now(). You feed it
 // plain numbers (the detector's debug snapshot + a timestamp you inject), it
 // stores them and computes running summary stats. That keeps it trivial to unit
@@ -36,10 +26,10 @@ const MAX_SAMPLES = 400;
 /**
  * Round a number to a few decimals for a readable report, passing null through.
  * @param {number|null|undefined} n
- * @param {number} [decimals=1]
+ * @param {number} [decimals=3]
  * @returns {number|null}
  */
-function round(n, decimals = 1) {
+function round(n, decimals = 3) {
   if (typeof n !== 'number' || !Number.isFinite(n)) {
     return null;
   }
@@ -52,9 +42,9 @@ function round(n, decimals = 1) {
  *
  * Lifecycle:
  *   1. start(meta, atMs) when the set ARMS. `meta` carries the fixed context
- *      for the set (exercise, difficulty, target reps, the downAngle / upAngle
- *      thresholds the detector is aiming for). `atMs` is the injected start
- *      timestamp.
+ *      for the set (exercise, difficulty, target reps, the downFraction /
+ *      upFraction thresholds the detector is aiming for). `atMs` is the injected
+ *      start timestamp.
  *   2. sample(snapshot, atMs) each throttled frame (or on a phase change) with
  *      the SAME numbers the detector used this frame. Only records while active.
  *   3. finish(reason, atMs) when the set completes or the user emergency-exits.
@@ -80,21 +70,18 @@ export function createPushupDiagnostics() {
 
   // Running summary stats, updated on EVERY sample (not just the stored ones).
   let sampleCount = 0;
-  let minAngle = null; // smallest (deepest bend) elbow angle seen
-  let maxAngle = null; // largest (straightest) elbow angle seen
-  let lastAngle = null;
-  // Did the smoothed elbow angle ever bend PAST the "down" threshold? (i.e.
-  // angle <= downAngle). If this is false after a real set, downAngle is too
-  // shallow (set too small) for how deep this camera reads the user's bend.
-  let downAngleReached = false;
+  let minExcursion = null;
+  let maxExcursion = null;
+  let lastExcursion = null;
+  let downFractionReached = false; // did the smoothed excursion ever reach down?
   let repsCounted = 0;
 
   function resetStats() {
     sampleCount = 0;
-    minAngle = null;
-    maxAngle = null;
-    lastAngle = null;
-    downAngleReached = false;
+    minExcursion = null;
+    maxExcursion = null;
+    lastExcursion = null;
+    downFractionReached = false;
     repsCounted = 0;
   }
 
@@ -102,7 +89,7 @@ export function createPushupDiagnostics() {
     /**
      * Begin recording for a freshly-armed set. Clears any previous recording.
      * @param {object} startMeta  Fixed context: { exercise, difficulty,
-     *                             targetReps, downAngle, upAngle, side }.
+     *                             targetReps, downFraction, upFraction, side }.
      * @param {number} atMs       Injected start timestamp (ms).
      */
     start(startMeta, atMs) {
@@ -118,8 +105,8 @@ export function createPushupDiagnostics() {
     /**
      * Record one throttled frame. Ignored unless the recorder is active.
      * @param {object} snapshot  The detector numbers this frame: {
-     *   angle, rawAngle, downAngle, upAngle, confident, armed, phase,
-     *   postureOk, reps }.
+     *   excursion, downFraction, upFraction, bodyScalePx, bodyScaleLocked,
+     *   upperBodyY, confident, armed, phase, postureOk, reps }.
      * @param {number} atMs      Injected timestamp (ms).
      */
     sample(snapshot, atMs) {
@@ -128,24 +115,21 @@ export function createPushupDiagnostics() {
       }
       sampleCount += 1;
 
-      const angle =
-        typeof snapshot.angle === 'number' && Number.isFinite(snapshot.angle)
-          ? snapshot.angle
-          : null;
-      if (angle !== null) {
-        lastAngle = angle;
-        if (minAngle === null || angle < minAngle) {
-          minAngle = angle;
+      const excursion =
+        typeof snapshot.excursion === 'number' ? snapshot.excursion : null;
+      if (excursion !== null) {
+        lastExcursion = excursion;
+        if (minExcursion === null || excursion < minExcursion) {
+          minExcursion = excursion;
         }
-        if (maxAngle === null || angle > maxAngle) {
-          maxAngle = angle;
+        if (maxExcursion === null || excursion > maxExcursion) {
+          maxExcursion = excursion;
         }
-        // Reaching "down" means the elbow bent PAST (at or below) downAngle.
         if (
-          typeof snapshot.downAngle === 'number' &&
-          angle <= snapshot.downAngle
+          typeof snapshot.downFraction === 'number' &&
+          excursion >= snapshot.downFraction
         ) {
-          downAngleReached = true;
+          downFractionReached = true;
         }
       }
       if (typeof snapshot.reps === 'number') {
@@ -158,10 +142,18 @@ export function createPushupDiagnostics() {
           typeof atMs === 'number' && startedAtMs !== null
             ? Math.round(atMs - startedAtMs)
             : null,
-        angle: round(angle),
-        rawAngle: round(snapshot.rawAngle),
-        downAngle: round(snapshot.downAngle),
-        upAngle: round(snapshot.upAngle),
+        excursion: round(excursion),
+        downFraction: round(snapshot.downFraction),
+        upFraction: round(snapshot.upFraction),
+        bodyScalePx:
+          typeof snapshot.bodyScalePx === 'number'
+            ? Math.round(snapshot.bodyScalePx)
+            : null,
+        bodyScaleLocked: !!snapshot.bodyScaleLocked,
+        upperBodyY:
+          typeof snapshot.upperBodyY === 'number'
+            ? Math.round(snapshot.upperBodyY)
+            : null,
         confident: !!snapshot.confident,
         armed: !!snapshot.armed,
         phase: snapshot.phase ?? null,
@@ -221,15 +213,12 @@ export function createPushupDiagnostics() {
             : null,
         summary: {
           sampleCount,
-          // The deepest bend (smallest angle) and straightest (largest angle)
-          // reached this set, so a copied report shows the full range of motion
-          // the camera actually saw.
-          minAngle: round(minAngle),
-          maxAngle: round(maxAngle),
-          lastAngle: round(lastAngle),
-          // Did the smoothed elbow angle ever bend PAST the "down" threshold?
-          // If this is false after a real set, downAngle is set too shallow.
-          downAngleReached,
+          minExcursion: round(minExcursion),
+          maxExcursion: round(maxExcursion),
+          lastExcursion: round(lastExcursion),
+          // Did the detector's smoothed dip ever reach the "down" threshold?
+          // If this is false after a real set, the downFraction is too deep.
+          downFractionReached,
           repsCounted,
         },
         samples,

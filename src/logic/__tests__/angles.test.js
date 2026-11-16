@@ -1,7 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
   angleBetween,
-  angleBetween3D,
   isConfident,
   allConfident,
   isBodyHorizontal,
@@ -42,75 +41,6 @@ describe('angleBetween', () => {
     const result = angleBetween(a, vertex, c);
     expect(result).toBeGreaterThanOrEqual(0);
     expect(result).toBeLessThanOrEqual(180);
-  });
-});
-
-describe('angleBetween3D', () => {
-  // Tiny helper to build a 3D point the way the keypoint adapter does:
-  // a joint carries x3d/y3d/z3d in meters.
-  const p = (x3d, y3d, z3d) => ({ x3d, y3d, z3d });
-
-  it('measures a straight arm as ~180 degrees (collinear 3D points)', () => {
-    // shoulder -- elbow -- wrist all on one straight line in 3D: fully open.
-    const shoulder = p(0, 0, 0);
-    const elbow = p(1, 0, 0);
-    const wrist = p(2, 0, 0);
-    expect(angleBetween3D(shoulder, elbow, wrist)).toBeCloseTo(180, 5);
-  });
-
-  it('measures a right angle as ~90 degrees (perpendicular 3D vectors)', () => {
-    // From the vertex: one arm points along +x, the other along +y => 90 deg.
-    const a = p(1, 0, 0);
-    const vertex = p(0, 0, 0);
-    const c = p(0, 1, 0);
-    expect(angleBetween3D(a, vertex, c)).toBeCloseTo(90, 5);
-  });
-
-  it('measures a bent elbow at the push-up bottom as ~90 degrees', () => {
-    // Rough side-on push-up bottom geometry: upper arm points up/back toward
-    // the shoulder, forearm points down to the wrist on the floor. The two
-    // arms meet at a right angle at the elbow.
-    const shoulder = p(0, -0.3, -0.3);
-    const elbow = p(0, 0, 0);
-    const wrist = p(0, -0.3, 0.3);
-    expect(angleBetween3D(shoulder, elbow, wrist)).toBeCloseTo(90, 5);
-  });
-
-  it('is invariant to a uniform scale and translation of all three points', () => {
-    // Pick an arbitrary (non-right) angle so the invariance is meaningful.
-    const a = p(1, 0, 0);
-    const vertex = p(0, 0, 0);
-    const c = p(1, 1, 0); // 45 degrees from the +x arm
-    const base = angleBetween3D(a, vertex, c);
-
-    // Scale every coordinate by 7 and shift the whole thing by (10, -4, 2).
-    const scale = 7;
-    const shift = { x: 10, y: -4, z: 2 };
-    const move = (pt) =>
-      p(pt.x3d * scale + shift.x, pt.y3d * scale + shift.y, pt.z3d * scale + shift.z);
-    const moved = angleBetween3D(move(a), move(vertex), move(c));
-
-    expect(base).toBeCloseTo(45, 5);
-    expect(moved).toBeCloseTo(base, 5);
-  });
-
-  it('returns the documented null sentinel (not NaN) for degenerate/missing input', () => {
-    const vertex = p(0, 0, 0);
-    const good = p(1, 0, 0);
-
-    // A missing point.
-    expect(angleBetween3D(null, vertex, good)).toBeNull();
-    expect(angleBetween3D(good, undefined, good)).toBeNull();
-
-    // A non-finite coordinate (e.g. a joint whose 3D never populated).
-    expect(angleBetween3D({ x3d: NaN, y3d: 0, z3d: 0 }, vertex, good)).toBeNull();
-    expect(angleBetween3D(good, vertex, { x3d: 0, y3d: 0, z3d: undefined })).toBeNull();
-
-    // A zero-length arm: two points sit on top of each other.
-    expect(angleBetween3D(vertex, vertex, good)).toBeNull();
-
-    // And none of these ever leak a NaN.
-    expect(Number.isNaN(angleBetween3D(null, vertex, good))).toBe(false);
   });
 });
 

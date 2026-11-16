@@ -23,12 +23,15 @@ import EmergencyExit from './EmergencyExit.jsx';
 import DebugReadout from './DebugReadout.jsx';
 import { createWorkoutQueue } from '../logic/workoutQueue.js';
 import { createRepCounter } from '../logic/repCounter.js';
-import { getPreset, pickBetterSide, evaluateOrientation } from '../logic/exercises.js';
+import { createVerticalRepCounter } from '../logic/verticalRepCounter.js';
+import { getPreset, getExercise, pickBetterSide, evaluateOrientation } from '../logic/exercises.js';
+import { angleBetween, allConfident, createAngleSmoother } from '../logic/angles.js';
 import {
-  angleBetween3D,
-  allConfident,
-  createAngleSmoother,
-} from '../logic/angles.js';
+  measureBodyScale,
+  measureUpperBodyY,
+  createBodyScaleTracker,
+  createPostureGuard,
+} from '../logic/upperBodySignal.js';
 import { createPositionGate } from '../logic/positionGate.js';
 import { createStatusDebouncer } from '../logic/statusDebounce.js';
 import { createPushupDiagnostics } from '../logic/pushupDiagnostics.js';
@@ -58,17 +61,24 @@ const DEBUG_THROTTLE_MS = 200;
 /**
  * Build a rep counter configured for a specific workout step.
  *
- * BOTH exercises are now counted the SAME way: from a joint ANGLE opening and
- * closing, using the angle-based createRepCounter fed by the preset's
- * downAngle / upAngle.
- *   - PUSH-UPS watch the ELBOW angle (shoulder -> elbow -> wrist), measured in
- *     3D meters (see the push-up branch in handlePose).
- *   - SIT-UPS watch the HIP/torso angle (shoulder -> hip -> knee), unchanged.
- * getPreset returns { downAngle, upAngle, defaultReps } for both (see
- * exercises.js), so there is just one counter to build.
+ * The two exercises are counted in DIFFERENT ways, so we pick the matching
+ * counter here:
+ *   - PUSH-UPS watch the VISIBLE UPPER BODY move DOWN toward the floor and back
+ *     UP, so they use the position-based createVerticalRepCounter fed by the
+ *     body-scale fractions (downFraction / upFraction) from the preset.
+ *   - SIT-UPS watch the HIP/torso ANGLE open and close, so they keep using the
+ *     angle-based createRepCounter fed by the preset's downAngle / upAngle.
+ * getPreset already returns the right shape for each exercise (see exercises.js).
  */
 function makeCounterForStep(step) {
   const preset = getPreset(step.exercise, step.difficulty);
+  if (step.exercise === 'pushup') {
+    return createVerticalRepCounter({
+      downFraction: preset.downFraction,
+      upFraction: preset.upFraction,
+      minConfidence: MIN_CONFIDENCE,
+    });
+  }
   return createRepCounter({
     downAngle: preset.downAngle,
     upAngle: preset.upAngle,
@@ -118,6 +128,24 @@ export default function WorkoutSession({
   const statusDebouncerRef = useRef(null);
   if (statusDebouncerRef.current === null) {
     statusDebouncerRef.current = createStatusDebouncer();
+  }
+  // PUSH-UP ONLY: the STABLE body-scale ruler. We feed it the live body-scale
+  // each confident frame while the step is arming, then lock() it the moment
+  // the step arms, and reuse that locked value for the rest of the set so a
+  // front-facing shoulder width that swings through the rep cannot distort the
+  // excursion. Reset per step. (Sit-ups never touch this.)
+  const bodyScaleTrackerRef = useRef(null);
+  if (bodyScaleTrackerRef.current === null) {
+    bodyScaleTrackerRef.current = createBodyScaleTracker();
+  }
+  // PUSH-UP ONLY: the upper-body ANTI-STANDING guard. Its per-frame update()
+  // result is passed to the counter as postureOk so a standing / walking bob
+  // cannot enter the 'down' phase. Reset per step.
+  const postureGuardRef = useRef(null);
+  if (postureGuardRef.current === null) {
+    postureGuardRef.current = createPostureGuard(
+      getExercise('pushup').postureGuard
+    );
   }
   // PUSH-UP ONLY: the "click Begin -> leave a report" diagnostics recorder. It
   // starts recording when a push-up step arms and is read back via the debug
@@ -248,30 +276,23 @@ export default function WorkoutSession({
       keypoints
     );
 
-    // 2. Gather the keypoints that side needs and check their confidence. For
-    //    PUSH-UPS the required joints are now the shoulder, elbow AND wrist the
-    //    elbow angle is built from; for SIT-UPS they are the shoulder, hip and
-    //    knee of the torso angle. So jointsConfident already means "we can see
-    //    the whole measured joint triple clearly".
+    // 2. Gather the keypoints that side needs and check their confidence.
     const needed = requiredKeypoints.map((name) => keypoints[name]);
     const jointsConfident =
       needed.every(Boolean) && allConfident(needed, MIN_CONFIDENCE);
 
-    // 3. Body-posture gate (anti-cheat, part 2). For SIT-UPS this applies a
-    //    lenient 2D "roughly horizontal" sanity check so an obviously standing
-    //    body is rejected. PUSH-UPS now use the 3D posture gate
-    //    (isPushupPosture3D via orientation 'pushup3d'): the torso must be
-    //    plausibly horizontal in the real-world landmarks. THIS IS THE FIX for
-    //    the countdown advancing when the user was NOT in position — before,
-    //    push-ups used 'any' (always true) and required only one shoulder, so
-    //    merely being seen armed the countdown.
+    // 3. Body-orientation gate (anti-cheat, part 2). For SIT-UPS this applies a
+    //    lenient "roughly horizontal" sanity check so an obviously standing body
+    //    is rejected. PUSH-UPS now use orientation 'any', so this check never
+    //    blocks them (it would need the hip, which is exactly the keypoint a
+    //    webcam cannot fit during a floor push-up). A standing push-up "bob" is
+    //    instead rejected by the body-relative vertical excursion + hysteresis
+    //    in createVerticalRepCounter plus the 5s arming countdown below.
     const orientationOk = evaluateOrientation(step.exercise, keypoints, side);
 
-    // You only truly count — and the arming countdown only advances — when BOTH
-    // the required joints are clearly visible AND the body meets the exercise's
-    // posture expectation. For push-ups that is the shoulder/elbow/wrist
-    // confidence AND the 3D push-up posture gate, so a standing/upright body can
-    // neither arm the 5s countdown nor count a rep.
+    // You only truly count when BOTH the required joints are clearly visible AND
+    // the body meets the exercise's orientation expectation (always true for
+    // push-ups, a lenient horizontal check for sit-ups).
     const isConfident = jointsConfident && orientationOk;
 
     // A single frame timestamp used by both the arming gate and the warning
@@ -303,24 +324,33 @@ export default function WorkoutSession({
     const { armed: isArmed, heldMs, remainingSeconds } =
       positionGateRef.current.update(isConfident, nowMs);
 
+    // PUSH-UP ONLY: while the step is still arming, feed the STABLE ruler the
+    // live body-scale each CONFIDENT frame so it builds a steady baseline from
+    // the user holding the top position during the 5s countdown. We do this
+    // BEFORE the not-armed early-return so the ruler is ready to lock the
+    // instant the step arms. (This does not change the gate timing at all.)
+    if (step.exercise === 'pushup' && !isArmed && isConfident) {
+      const armingScale = measureBodyScale(keypoints);
+      if (armingScale != null) {
+        bodyScaleTrackerRef.current.push(armingScale, true);
+      }
+    }
+
     // Detect the ARM transition (Begin / "GO!"). For push-ups this is where we
-    // START the diagnostics report. The elbow-angle method needs NO rulers or
-    // rest references to lock (an angle is already scale- and viewpoint-
-    // invariant), so arming is now just "start recording the numbers".
+    // LOCK the ruler and START the diagnostics report.
     if (step.exercise === 'pushup' && isArmed && !wasArmed) {
+      bodyScaleTrackerRef.current.lock();
       const preset = getPreset(step.exercise, step.difficulty);
       diagnosticsRef.current.start(
         {
           exercise: step.exercise,
           difficulty: step.difficulty,
           targetReps: step.targetReps,
-          // The push-up signal is now the 3D ELBOW ANGLE (degrees), so the set
-          // context records the down/up ANGLE thresholds the detector is aiming
-          // for (bend PAST downAngle to reach the bottom, straighten PAST
-          // upAngle to complete the rep).
-          downAngle: preset.downAngle,
-          upAngle: preset.upAngle,
+          downFraction: preset.downFraction,
+          upFraction: preset.upFraction,
           side,
+          bodyScalePx: bodyScaleTrackerRef.current.scale,
+          bodyScaleLocked: bodyScaleTrackerRef.current.locked,
         },
         nowMs
       );
@@ -341,94 +371,104 @@ export default function WorkoutSession({
       return;
     }
 
-    // 4. Compute the tracked ANGLE for THIS exercise and feed the counter.
-    //    BOTH exercises are now counted from a joint ANGLE opening and closing,
-    //    so the pipeline is the same shape for each — only WHICH angle and in
-    //    WHICH coordinate space differs:
-    //      - PUSH-UPS: the ELBOW angle (shoulder -> elbow -> wrist), measured in
-    //        3D meters via angleBetween3D. A 3D angle is scale- and viewpoint-
-    //        invariant, so it never touches the null 2D pixels and works side-on,
-    //        angled, and (best-effort) front-on.
-    //      - SIT-UPS: the HIP/torso 2D angle (shoulder -> hip -> knee), exactly
-    //        as before — sit-ups move to 3D in a later feature.
-    //    In BOTH cases the raw angle is smoothed over the last few frames (the
-    //    smoother just averages numbers) before the counter sees it, so detector
-    //    jitter cannot spike a fake threshold crossing. Smoothing is layered ON
-    //    TOP of the hysteresis band + anti-cheat gate, not instead of them. If
-    //    we cannot read a reliable angle this frame, we treat it like a
-    //    not-detected frame for the warning (still debounced) and early-return
-    //    WITHOUT advancing — a null-guarded skip can never nudge the counter.
+    // 4. Compute the tracked signal for THIS exercise and feed the counter.
+    //    The two exercises track different things, so the pipeline forks here:
+    //      - PUSH-UPS: the VISIBLE UPPER BODY's vertical position (shoulder,
+    //        averaged with the nose when present) plus a body-scale ruler, so a
+    //        down-then-up dip counts even with the legs/hips out of frame.
+    //      - SIT-UPS: the HIP/torso ANGLE (shoulder -> hip -> knee), exactly as
+    //        before — nothing about sit-ups changed.
+    //    In BOTH cases the raw reading is smoothed over the last few frames
+    //    (the smoother just averages numbers, so it smooths a y position just as
+    //    well as an angle) before the counter sees it, so detector jitter cannot
+    //    spike a fake threshold crossing. Smoothing is layered ON TOP of the
+    //    hysteresis band + anti-cheat gate, not instead of them. If we cannot
+    //    read a reliable signal this frame, we treat it like a not-detected
+    //    frame for the warning (still debounced) and early-return WITHOUT
+    //    advancing — a null-guarded skip can never nudge the counter.
     if (step.exercise === 'pushup') {
-      // --- PUSH-UP: 3D ELBOW ANGLE (shoulder -> elbow -> wrist) ---
-      // This is the backbone of the rebuild and how real push-up counters work:
-      // watch the elbow bend (small angle = down) and straighten (big angle =
-      // up) through the up/down state machine. We read the angle straight from
-      // the 3D world landmarks (x3d/y3d/z3d, meters) the adapter attaches, so it
-      // never depends on the 2D pixels (which come back null in this runtime).
-      // The posture gate (isConfident already folds in isPushupPosture3D) stops
-      // a standing arm-bend from counting; no body-scale / depth ruler is needed
-      // because an angle is already scale- and viewpoint-invariant.
-      const [aName, vName, cName] = angleJoints; // [shoulder, elbow, wrist]
-      const a = keypoints[aName];
-      const v = keypoints[vName]; // elbow = the vertex we measure
-      const c = keypoints[cName];
-      // angleBetween3D returns null for missing/degenerate 3D input (never NaN),
-      // so a frame without usable 3D joints is simply skipped below.
-      const angle = angleBetween3D(a, v, c);
-      if (angle == null) {
+      // --- PUSH-UP: upper-body vertical movement ---
+      const currentY = measureUpperBodyY(keypoints, side);
+      // Use the LOCKED stable ruler captured during arming. If the lock failed
+      // (e.g. no confident frame during the hold), fall back to the live
+      // measurement for this frame so counting is not stranded.
+      const liveScale = measureBodyScale(keypoints);
+      const bodyScalePx = bodyScaleTrackerRef.current.locked
+        ? bodyScaleTrackerRef.current.scale
+        : liveScale;
+      if (currentY == null || bodyScalePx == null) {
         updateDisplayConfident(statusDebouncerRef.current.update(false, nowMs));
         return;
       }
-      const smoothedAngle = smootherRef.current.push(angle);
-      // Feed the SAME angle-based counter sit-ups use. isConfident already
-      // requires the shoulder/elbow/wrist to be visible AND the 3D push-up
-      // posture to pass, so a standing bob is gated out here too.
-      counter.update(smoothedAngle, isConfident);
+      // ANTI-STANDING GUARD: does the posture look like a push-up (not a
+      // standing / walking bob)? This is passed to the counter as postureOk so
+      // a standing dip can never ENTER the 'down' phase. We use the same ruler
+      // the counter uses so the guard and the excursion agree.
+      const postureOk = postureGuardRef.current.update(
+        keypoints,
+        side,
+        bodyScalePx
+      );
+      const smoothedY = smootherRef.current.push(currentY);
+      counter.update(smoothedY, bodyScalePx, isConfident, postureOk);
 
       // --- DEBUG READOUT + DIAGNOSTICS REPORT (throttled) ---
-      // Surface the SAME numbers the elbow-angle counter used this frame so the
-      // user can tune from real data: the live (smoothed) elbow angle in
-      // degrees, the raw angle before smoothing, the down/up ANGLE thresholds it
-      // is working between, plus confidence / armed / phase / posture / reps.
-      // These are the real values the detector decided on, just throttled so the
-      // panel never re-renders at frame rate.
-      const preset = getPreset(step.exercise, step.difficulty);
-      const snapshot = {
-        angle: smoothedAngle, // smoothed elbow angle the counter actually saw
-        rawAngle: angle, // pre-smoothing elbow angle (for comparison)
-        downAngle: preset.downAngle, // bend PAST this (angle <= downAngle) = down
-        upAngle: preset.upAngle, // straighten PAST this (angle >= upAngle) = up
+      // Pull the SAME numbers the FSM just used from counter.debug, pair them
+      // with the ruler + posture result, and push them to the on-screen panel
+      // and the report AT MOST a few times a second. The raw (pre-smoothing)
+      // excursion is computed the same way the FSM computes the smoothed one,
+      // using the counter's own baseline, so "raw vs smoothed" is apples to
+      // apples. All of this is gated by maybeUpdateDebug's elapsed-time check,
+      // so it never re-renders the HUD/overlay at frame rate.
+      const dbg = counter.debug;
+      const rawExcursion =
+        dbg.baseline != null && bodyScalePx > 0
+          ? (currentY - dbg.baseline) / bodyScalePx
+          : null;
+      const readout = {
+        excursion: dbg.lastExcursion,
+        rawExcursion,
+        downFraction: dbg.downFraction,
+        upFraction: dbg.upFraction,
+        bodyScalePx,
+        bodyScaleLocked: bodyScaleTrackerRef.current.locked,
+        upperBodyY: currentY,
         confident: isConfident,
         armed: isArmed,
-        phase: counter.phase,
-        postureOk: orientationOk,
-        reps: counter.reps,
+        phase: dbg.phase,
+        postureOk,
+        reps: dbg.reps,
       };
-      if (maybeUpdateDebug(nowMs, snapshot, diagnosticsRef.current.report)) {
-        // Record a report sample on the same throttled beat (same numbers).
-        diagnosticsRef.current.sample(snapshot, nowMs);
+      if (maybeUpdateDebug(nowMs, readout, diagnosticsRef.current.report)) {
+        // Record a report sample on the same throttled beat (plus the UI just
+        // read a fresh report snapshot above).
+        diagnosticsRef.current.sample(
+          {
+            excursion: dbg.lastExcursion,
+            downFraction: dbg.downFraction,
+            upFraction: dbg.upFraction,
+            bodyScalePx,
+            bodyScaleLocked: bodyScaleTrackerRef.current.locked,
+            upperBodyY: currentY,
+            confident: isConfident,
+            armed: isArmed,
+            phase: dbg.phase,
+            postureOk,
+            reps: dbg.reps,
+          },
+          nowMs
+        );
       }
     } else {
-      // --- SIT-UP: 3D HIP/TORSO ANGLE (shoulder -> hip -> knee) ---
-      // Sit-ups now measure the torso fold in the SAME 3D world-landmark space
-      // (x3d/y3d/z3d, meters) the push-ups use, via angleBetween3D, instead of
-      // the 2D pixel angle. WHY: in this runtime the 2D pixels come back null
-      // and are only rebuilt (projected) from the 3D, so a pixel angle was
-      // measured on unreliable, frame-centered positions. The 3D hip angle is
-      // scale- and viewpoint-invariant, so it reads the fold honestly:
-      //   lying flat  = torso open  = large angle
-      //   sitting up  = torso folded = small angle
-      // The existing degree thresholds (downAngle/upAngle in exercises.js) still
-      // make sense: an actual joint angle in degrees is the same quantity
-      // whether it is computed from meters or pixels, so no threshold change is
-      // needed — only the coordinate space the angle is read from changed.
-      const [aName, vName, cName] = angleJoints; // [shoulder, hip, knee]
+      // --- SIT-UP: hip/torso angle (unchanged path) ---
+      let angle = null;
+      const [aName, vName, cName] = angleJoints;
       const a = keypoints[aName];
-      const v = keypoints[vName]; // hip = the vertex we measure
+      const v = keypoints[vName];
       const c = keypoints[cName];
-      // angleBetween3D returns null (never NaN) for missing/degenerate 3D input,
-      // so a frame without usable 3D joints is simply skipped below.
-      const angle = angleBetween3D(a, v, c);
+      if (a && v && c) {
+        angle = angleBetween(a, v, c);
+      }
       if (angle == null) {
         updateDisplayConfident(statusDebouncerRef.current.update(false, nowMs));
         return;
@@ -466,9 +506,9 @@ export default function WorkoutSession({
         // must get into position again before counting resumes.
         positionGateRef.current.reset();
         statusDebouncerRef.current.reset(); // fresh optimistic warning state
-        // Fresh diagnostics recorder for the new step. (The push-up path no
-        // longer uses any pixel/depth rulers or rest references — the elbow
-        // angle needs none — so there is nothing else to reset here.)
+        // Fresh stable ruler, posture guard and diagnostics for the new step.
+        bodyScaleTrackerRef.current.reset();
+        postureGuardRef.current.reset();
         diagnosticsRef.current.reset();
         lastDebugAtRef.current = -Infinity;
         setDebugReadout(null);

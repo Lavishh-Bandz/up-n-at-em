@@ -91,25 +91,10 @@ describe('measureUpperBodyY', () => {
     expect(y).toBeCloseTo(200);
   });
 
-  it('falls back to the OTHER shoulder when the chosen one is missing', () => {
-    // THE LIVE-BUG FIX: the chosen side is a PREFERENCE, not a hard requirement.
-    // When the chosen (left) shoulder is absent but the right one is present we
-    // must still report a y (here the right shoulder's 200 on its own), instead
-    // of returning null the way the old single-shoulder read did. That old
-    // behavior is exactly why live upperBodyY came back null every frame while
-    // bodyScalePx stayed real.
+  it('returns null when the chosen shoulder is missing', () => {
     expect(
       measureUpperBodyY({ right_shoulder: kp(140, 200) }, 'left')
-    ).toBeCloseTo(200);
-  });
-
-  it('falls back to the nose alone when no shoulder has a usable y', () => {
-    // Last-resort anchor: the head still dips during a push-up, so a lone nose
-    // is better than nothing.
-    expect(measureUpperBodyY({ nose: kp(120, 150) }, 'left')).toBeCloseTo(150);
-  });
-
-  it('returns null only when NO upper-body anchor is available', () => {
+    ).toBeNull();
     expect(measureUpperBodyY({}, 'left')).toBeNull();
     expect(measureUpperBodyY(null, 'left')).toBeNull();
   });

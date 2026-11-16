@@ -19,21 +19,13 @@ describe('exercise descriptors', () => {
     expect(() => getExercise('backflip')).toThrow();
   });
 
-  it('tracks push-ups by the 3D ELBOW angle (shoulder -> elbow -> wrist), both sides', () => {
-    // Push-ups are now ANGLE-based, like every working push-up counter: we
-    // measure the ELBOW angle (shoulder -> elbow -> wrist) and watch it bend
-    // down and straighten up. The joints are listed vertex-in-the-middle
-    // (elbow is the corner angleBetween3D measures), exactly like sit-ups.
-    expect(EXERCISES.pushup.sides.left.angleJoints).toEqual([
-      'left_shoulder',
-      'left_elbow',
-      'left_wrist',
-    ]);
-    expect(EXERCISES.pushup.sides.right.angleJoints).toEqual([
-      'right_shoulder',
-      'right_elbow',
-      'right_wrist',
-    ]);
+  it('tracks push-ups by the upper-body shoulder signal, not an angle (both sides)', () => {
+    // Push-ups are position-based now: no angle to measure, and the single
+    // shoulder we watch is the vertical signal + body-scale anchor for its side.
+    expect(EXERCISES.pushup.sides.left.angleJoints).toBeNull();
+    expect(EXERCISES.pushup.sides.right.angleJoints).toBeNull();
+    expect(EXERCISES.pushup.sides.left.signalJoints).toEqual(['left_shoulder']);
+    expect(EXERCISES.pushup.sides.right.signalJoints).toEqual(['right_shoulder']);
   });
 
   it('uses MoveNet keypoint names for the sit-up tracked angle joints (both sides)', () => {
@@ -51,23 +43,14 @@ describe('exercise descriptors', () => {
   });
 
   it('lists required keypoints for anti-cheat pose validation (both sides)', () => {
-    // Push-ups now require the SHOULDER, ELBOW and WRIST on the chosen side —
-    // the exact three joints the elbow angle is built from. The angle cannot be
-    // measured without all three, so all three must be confidently visible.
-    expect(EXERCISES.pushup.sides.left.requiredKeypoints).toEqual([
-      'left_shoulder',
-      'left_elbow',
-      'left_wrist',
-    ]);
-    expect(EXERCISES.pushup.sides.right.requiredKeypoints).toEqual([
-      'right_shoulder',
-      'right_elbow',
-      'right_wrist',
-    ]);
-    // The elbow and wrist are now REQUIRED (the angle depends on them).
+    // Push-ups require ONLY the shoulder on each side — no elbow, wrist or hip —
+    // so the legs/hips being out of a webcam's frame never blocks counting.
+    expect(EXERCISES.pushup.sides.left.requiredKeypoints).toEqual(['left_shoulder']);
+    expect(EXERCISES.pushup.sides.right.requiredKeypoints).toEqual(['right_shoulder']);
     for (const side of ['left', 'right']) {
-      expect(EXERCISES.pushup.sides[side].requiredKeypoints).toContain(`${side}_elbow`);
-      expect(EXERCISES.pushup.sides[side].requiredKeypoints).toContain(`${side}_wrist`);
+      for (const joint of ['elbow', 'wrist', 'hip']) {
+        expect(EXERCISES.pushup.sides[side].requiredKeypoints).not.toContain(`${side}_${joint}`);
+      }
     }
     // Sit-ups are unchanged: they still require the hip.
     expect(EXERCISES.situp.sides.left.requiredKeypoints).toContain('left_hip');
@@ -85,37 +68,30 @@ describe('exercise descriptors', () => {
     }
   });
 
-  it('exposes all three push-up difficulty presets as elbow angles', () => {
+  it('exposes all three push-up difficulty presets as body-scale fractions', () => {
     for (const difficulty of DIFFICULTIES) {
       const preset = getPreset('pushup', difficulty);
-      // Push-ups are angle-based now, so the presets are ELBOW ANGLES fed to
-      // createRepCounter (bend PAST downAngle, straighten PAST upAngle).
-      expect(typeof preset.downAngle).toBe('number');
-      expect(typeof preset.upAngle).toBe('number');
+      expect(typeof preset.downFraction).toBe('number');
+      expect(typeof preset.upFraction).toBe('number');
       expect(typeof preset.defaultReps).toBe('number');
-      // Hysteresis must hold: the "down" (bent) angle is the smaller number.
-      expect(preset.downAngle).toBeLessThan(preset.upAngle);
-      // No stale fraction fields linger from the retired position method.
-      expect(preset.downFraction).toBeUndefined();
-      expect(preset.upFraction).toBeUndefined();
+      // The vertical counter requires 0 < upFraction < downFraction.
+      expect(preset.upFraction).toBeGreaterThan(0);
+      expect(preset.upFraction).toBeLessThan(preset.downFraction);
     }
   });
 });
 
 describe('difficulty scaling', () => {
-  it('makes hard stricter than easy for push-ups (deeper bend, straighter lockout, more reps)', () => {
+  it('makes hard stricter than easy for push-ups (deeper dip, more reps)', () => {
     const easy = getPreset('pushup', 'easy');
     const standard = getPreset('pushup', 'standard');
     const hard = getPreset('pushup', 'hard');
 
-    // Harder = a DEEPER elbow bend to reach the bottom, which is a SMALLER
-    // downAngle (you must bend further before it counts you as "down").
-    expect(hard.downAngle).toBeLessThan(easy.downAngle);
-    expect(standard.downAngle).toBeLessThan(easy.downAngle);
-    expect(hard.downAngle).toBeLessThan(standard.downAngle);
-    // Harder also demands a STRAIGHTER lockout at the top: a BIGGER upAngle.
-    expect(hard.upAngle).toBeGreaterThan(easy.upAngle);
-    expect(hard.upAngle).toBeGreaterThan(standard.upAngle);
+    // A bigger downFraction means you must dip DEEPER (as a fraction of your
+    // own body-scale) to reach the bottom of the push-up.
+    expect(hard.downFraction).toBeGreaterThan(easy.downFraction);
+    expect(standard.downFraction).toBeGreaterThan(easy.downFraction);
+    expect(hard.downFraction).toBeGreaterThan(standard.downFraction);
     // Hard asks for more reps. defaultReps is unchanged from the old presets.
     expect(hard.defaultReps).toBeGreaterThan(easy.defaultReps);
     expect(easy.defaultReps).toBe(10);
@@ -167,32 +143,19 @@ describe('sumSideConfidence', () => {
 });
 
 describe('pickBetterSide', () => {
-  it('picks the better-visible ELBOW side for push-ups and returns the angle triple', () => {
-    // Push-ups now choose the side whose shoulder/elbow/wrist the camera sees
-    // best (the joints the elbow angle is built from). The right arm is clearly
-    // visible, the left is barely there.
+  it('picks the better-visible SHOULDER side for push-ups', () => {
+    // Push-ups now choose the side whose SHOULDER the camera sees best.
+    // Left shoulder barely visible, right shoulder clear.
     const keypoints = {
       left_shoulder: { score: 0.1 },
-      left_elbow: { score: 0.1 },
-      left_wrist: { score: 0.1 },
       right_shoulder: { score: 0.9 },
-      right_elbow: { score: 0.9 },
-      right_wrist: { score: 0.9 },
     };
     const result = pickBetterSide('pushup', keypoints);
     expect(result.side).toBe('right');
-    // Push-ups are angle-based now, so angleJoints is the shoulder/elbow/wrist
-    // triple (NOT null) and requiredKeypoints is that same triple.
-    expect(result.angleJoints).toEqual([
-      'right_shoulder',
-      'right_elbow',
-      'right_wrist',
-    ]);
-    expect(result.requiredKeypoints).toEqual([
-      'right_shoulder',
-      'right_elbow',
-      'right_wrist',
-    ]);
+    // Push-ups have no angle, so angleJoints is null and requiredKeypoints is
+    // the upper-body-only list.
+    expect(result.angleJoints).toBeNull();
+    expect(result.requiredKeypoints).toEqual(['right_shoulder']);
     expect(result.rightScore).toBeGreaterThan(result.leftScore);
   });
 
@@ -224,14 +187,11 @@ describe('pickBetterSide', () => {
 });
 
 describe('exercise orientation descriptors', () => {
-  it('push-ups gate on the 3D push-up posture (torso roughly horizontal)', () => {
-    // 'pushup3d' on purpose: the elbow angle alone would count a standing
-    // arm-bend as a rep, so push-ups now gate on a coarse 3D posture check
-    // (isPushupPosture3D) that rejects a near-vertical standing torso. The
-    // tilt tolerance lives on the descriptor so it can be tuned live.
-    expect(EXERCISES.pushup.orientation).toBe('pushup3d');
-    expect(typeof EXERCISES.pushup.postureMaxTiltDegrees).toBe('number');
-    expect(EXERCISES.pushup.postureMaxTiltDegrees).toBeGreaterThan(0);
+  it('push-ups do NOT gate on orientation (upper-body vertical detection handles it)', () => {
+    // 'any' on purpose: the old 'horizontal' gate needed the hip, which is out
+    // of frame on a webcam. A standing bob is rejected by the body-relative
+    // vertical excursion + hysteresis + the 5s arming countdown instead.
+    expect(EXERCISES.pushup.orientation).toBe('any');
   });
 
   it('sit-ups use a lenient horizontal sanity check', () => {
@@ -267,100 +227,73 @@ describe('evaluateOrientation', () => {
     expect(evaluateOrientation('situp', {}, 'left')).toBe(true);
   });
 
-  // PUSH-UPS now gate on the 3D posture: a flat (horizontal) 3D torso passes,
-  // an upright (vertical) 3D torso is rejected, and missing 3D fails open so a
-  // dropped keypoint never silently blocks a real rep.
-  it('passes a push-up when the 3D torso is roughly horizontal (plank)', () => {
-    // A plank: shoulders and hips sit at nearly the same world HEIGHT (y3d),
-    // spread out along the floor (x3d). The torso line is nearly flat.
-    const plank = {
-      left_shoulder: { x3d: 0.3, y3d: 0.0, z3d: -0.2, score: 0.9 },
-      right_shoulder: { x3d: -0.3, y3d: 0.0, z3d: -0.2, score: 0.9 },
-      left_hip: { x3d: 0.3, y3d: 0.02, z3d: 0.3, score: 0.9 },
-      right_hip: { x3d: -0.3, y3d: 0.02, z3d: 0.3, score: 0.9 },
-    };
-    expect(evaluateOrientation('pushup', plank, 'left')).toBe(true);
-  });
-
-  it('rejects a push-up when the 3D torso is standing upright (vertical)', () => {
-    // Standing: the hips sit far BELOW the shoulders in world y (a big vertical
-    // drop) with almost no run along the floor. The torso line is near-vertical.
-    const standing = {
-      left_shoulder: { x3d: 0.2, y3d: -0.5, z3d: 0.0, score: 0.9 },
-      right_shoulder: { x3d: -0.2, y3d: -0.5, z3d: 0.0, score: 0.9 },
-      left_hip: { x3d: 0.2, y3d: 0.5, z3d: 0.0, score: 0.9 },
-      right_hip: { x3d: -0.2, y3d: 0.5, z3d: 0.0, score: 0.9 },
-    };
-    expect(evaluateOrientation('pushup', standing, 'left')).toBe(false);
-  });
-
-  it('does not block a push-up when the 3D torso landmarks are missing (fails open)', () => {
-    // No usable 3D shoulder/hip to build a torso line: fail open (return true)
-    // so a dropped keypoint never silently blocks a real rep — the confidence
-    // gate handles "we cannot see you".
-    expect(evaluateOrientation('pushup', { left_shoulder: { score: 0.9 } }, 'left')).toBe(true);
+  // PUSH-UPS: orientation must NEVER block counting now, including when the hip
+  // is out of frame — that is the whole point of Solution 1.
+  it('never blocks a push-up on orientation, even when the hip is missing', () => {
+    // Hip absent entirely (out of frame): still returns true.
+    expect(evaluateOrientation('pushup', { left_shoulder: { x: 1, y: 1, score: 0.9 } }, 'left')).toBe(true);
+    // No keypoints at all: still returns true.
     expect(evaluateOrientation('pushup', {}, 'left')).toBe(true);
+    // Even a "standing upright" shoulder+hip layout returns true for push-ups,
+    // because the orientation is 'any' — rejecting a standing bob is the
+    // vertical counter's job, proven in verticalRepCounter.test.js.
+    const standing = {
+      left_shoulder: { x: 100, y: 100, score: 0.9 },
+      left_hip: { x: 108, y: 350, score: 0.9 },
+    };
+    expect(evaluateOrientation('pushup', standing, 'left')).toBe(true);
   });
 });
 
-describe('push-up anti-cheat: elbow-angle requirements', () => {
-  // Push-ups are counted from the 3D ELBOW angle (shoulder -> elbow -> wrist),
-  // so the descriptor must REQUIRE that whole triple (the angle cannot be
-  // measured without all three), and a standing/upright body must be rejected
-  // by the 3D posture gate.
-  it('requires the shoulder, elbow AND wrist on either side (the angle triple)', () => {
+describe('push-up anti-cheat: upper-body requirements', () => {
+  // Push-ups are counted from upper-body vertical movement, so the descriptor
+  // must not require the lower-body / arm joints a webcam cannot fit, and
+  // orientation must not block counting. (The "standing bob counts zero"
+  // behavior itself lives with the vertical counter — see
+  // verticalRepCounter.test.js — because that is where the body-relative
+  // excursion + hysteresis actually reject a small standing nod.)
+  it('does not require elbow, wrist or hip on either side', () => {
     for (const side of ['left', 'right']) {
       const required = EXERCISES.pushup.sides[side].requiredKeypoints;
-      expect(required).toEqual([
-        `${side}_shoulder`,
-        `${side}_elbow`,
-        `${side}_wrist`,
-      ]);
+      expect(required).toEqual([`${side}_shoulder`]);
+      expect(required).not.toContain(`${side}_elbow`);
+      expect(required).not.toContain(`${side}_wrist`);
+      expect(required).not.toContain(`${side}_hip`);
     }
   });
 
-  it('carries the 3D posture-gate tilt tolerance as pure data on the descriptor', () => {
-    // The posture tolerance lives on the push-up descriptor so it is easy to
-    // find and tune live. It is a positive number of degrees (how far the 3D
-    // torso line may tilt from flat and still read as a push-up / plank).
-    expect(typeof EXERCISES.pushup.postureMaxTiltDegrees).toBe('number');
-    expect(EXERCISES.pushup.postureMaxTiltDegrees).toBeGreaterThan(0);
-    // The retired 2D posture-guard config must be gone.
-    expect(EXERCISES.pushup.postureGuard).toBeUndefined();
-    // Sit-ups do not carry a push-up posture tilt.
-    expect(EXERCISES.situp.postureMaxTiltDegrees).toBeUndefined();
+  it('carries anti-standing posture-guard config as pure data on the descriptor', () => {
+    // The guard config lives on the push-up descriptor so it is easy to find
+    // and tune live. It must use ONLY upper-body cues (no hip / lower-body key).
+    const guard = EXERCISES.pushup.postureGuard;
+    expect(guard).toBeTruthy();
+    expect(typeof guard.wristPlantedMargin).toBe('number');
+    expect(typeof guard.uprightNoseFraction).toBe('number');
+    expect(typeof guard.wristStationaryFraction).toBe('number');
+    expect(guard.uprightNoseFraction).toBeGreaterThan(0);
+    // Sit-ups do not carry a push-up posture guard.
+    expect(EXERCISES.situp.postureGuard).toBeUndefined();
   });
 
-  it('uses field-standard STARTING elbow angles with correct hysteresis ordering', () => {
-    // Field survey: a bent elbow is ~90-110 deg at the bottom, an extended arm
-    // ~150-160 deg at the top. The starting presets must sit in that ballpark
-    // and keep downAngle < upAngle so the hysteresis band is real.
+  it('uses reachable STARTING downFractions a genuine push-up can cross', () => {
+    // Root-cause #3: the old 0.25/0.35/0.45 were too deep for a compressed
+    // front/low webcam angle. Starting values must be shallower (but still a
+    // real dip), while keeping the hysteresis ordering.
     for (const difficulty of DIFFICULTIES) {
       const preset = getPreset('pushup', difficulty);
-      expect(preset.downAngle).toBeGreaterThanOrEqual(80);
-      expect(preset.downAngle).toBeLessThan(preset.upAngle);
-      expect(preset.upAngle).toBeLessThanOrEqual(170);
+      expect(preset.downFraction).toBeLessThanOrEqual(0.25);
+      expect(preset.downFraction).toBeGreaterThan(preset.upFraction);
+      expect(preset.upFraction).toBeGreaterThan(0);
     }
   });
 
-  it('pickBetterSide + evaluateOrientation keep counting unblocked when the 3D torso is missing', () => {
-    // A frame with only the chosen arm's angle joints visible (hips out of
-    // frame, so the 3D torso line cannot be built). pickBetterSide returns the
-    // elbow-angle triple, and the posture gate fails open (does not block).
-    const frame = {
-      right_shoulder: { x: 400, y: 200, score: 0.9 },
-      right_elbow: { x: 410, y: 260, score: 0.9 },
-      right_wrist: { x: 420, y: 320, score: 0.9 },
-    };
+  it('pickBetterSide + evaluateOrientation keep counting unblocked when the hip is out of frame', () => {
+    // A frame with only the chosen shoulder visible (legs/hips out of frame).
+    const frame = { right_shoulder: { x: 400, y: 200, score: 0.9 } };
     const { side, requiredKeypoints } = pickBetterSide('pushup', frame);
     expect(side).toBe('right');
-    expect(requiredKeypoints).toEqual([
-      'right_shoulder',
-      'right_elbow',
-      'right_wrist',
-    ]);
-    // No 3D hip/shoulder torso line -> posture gate fails open, counting can
-    // proceed (the confidence gate handles "we cannot see you").
+    expect(requiredKeypoints).toEqual(['right_shoulder']);
+    // Orientation must NOT block, so push-up counting can proceed.
     expect(evaluateOrientation('pushup', frame, side)).toBe(true);
   });
 });

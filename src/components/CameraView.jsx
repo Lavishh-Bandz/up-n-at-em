@@ -16,76 +16,40 @@
 import { useEffect, useRef, useState } from 'react';
 import * as poseDetection from '@tensorflow-models/pose-detection';
 import { usePoseDetector } from '../hooks/usePoseDetector.js';
-import { BLAZEPOSE_KEYPOINT_NAMES } from '../logic/keypointAdapter.js';
 
 // Only draw joints/lines the detector is reasonably sure about. This matches
 // the anti-cheat idea: faint guesses are not drawn.
 const DRAW_THRESHOLD = 0.3;
 
-// -----------------------------------------------------------------------------
-// SHOW_SKELETON_OVERLAY — the single on/off switch for the drawn skeleton.
-// -----------------------------------------------------------------------------
-// Set to false right now. Here is WHY, in plain terms:
-//
-//   This app runs BlazePose on the "tfjs" runtime. On this runtime the model's
-//   2D pixel joints (the ones that say "this elbow is at pixel x,y in the video
-//   image") come back empty, so keypointAdapter.js rebuilds an x/y for every
-//   joint by PROJECTING the 3D "world" landmarks onto the screen. Those world
-//   landmarks are measured relative to the MIDDLE OF THE HIPS, in meters — they
-//   describe the SHAPE of the body, but they carry NO information about WHERE in
-//   the camera picture the body actually is. So the projection can only park the
-//   skeleton at the center of the frame at a guessed size. The result is a
-//   skeleton that moves with your body's shape but floats in the middle of the
-//   screen, detached from you. That "floating skeleton" is more confusing than
-//   helpful, and the overlay was always meant to be optional, so we hide it.
-//
-//   IMPORTANT: hiding the drawing changes NOTHING about counting. The push-up
-//   math (the pixel "ruler" bodyScalePx) and the sit-up angle math still use the
-//   exact same projected x/y from keypointAdapter.js — only the on-screen dots
-//   and lines are turned off here. The live video, the "Camera: W×H" readout,
-//   and the model-status lines all keep showing.
-//
-//   HOW TO TURN IT BACK ON PROPERLY later: this flag exists so a future version
-//   can re-enable the overlay the moment it has REAL image-space joints. The
-//   underlying library CAN return true pixel joints (it multiplies the model's
-//   normalized 0..1 positions by the video's width/height). It currently returns
-//   empty ones only because the <video> element is not told its real pixel size,
-//   so the detector multiplies by zero. Once a real image-space keypoint source
-//   is wired in (for example by giving the detector the true frame size, or by
-//   reading the model's normalized landmarks directly), flip this to true and
-//   the dots/lines below will line up on the body again.
-const SHOW_SKELETON_OVERLAY = false;
-
-// BlazePose always returns its 33 keypoints in this fixed order, so we can map
-// an index from the adjacency list back to a joint name to look it up in the
-// map. We import the SAME ordered name list the keypoint adapter uses to key
-// the map (see keypointAdapter.js), so the overlay and the detector can never
-// drift apart: whatever name the adapter stored a joint under is the name we
-// look it up by here.
-
 // The pairs of joints that should be joined by a line to look like a skeleton.
-// We ask pose-detection for BlazePose's official adjacency list; if that ever
-// fails we fall back to a hand-written list (BLAZEPOSE_CONNECTED_KEYPOINTS_PAIRS
-// from the library) so the overlay still draws.
+// We ask pose-detection for MoveNet's official adjacency list; if that ever
+// fails we fall back to a hand-written list so the overlay still works.
 function getSkeletonPairs() {
   try {
-    // Returns pairs of keypoint INDEXES, e.g. [11, 13] = left_shoulder-left_elbow.
+    // Returns pairs of keypoint INDEXES, e.g. [5, 7] = left_shoulder-left_elbow.
     return poseDetection.util.getAdjacentPairs(
-      poseDetection.SupportedModels.BlazePose
+      poseDetection.SupportedModels.MoveNet
     );
   } catch {
-    // BlazePose's connected-keypoint pairs, by index into the 33-name list
-    // above: face, arms, hands, torso, legs and feet.
+    // MoveNet keypoint index order (COCO): 0 nose, 1/2 eyes, 3/4 ears,
+    // 5/6 shoulders, 7/8 elbows, 9/10 wrists, 11/12 hips, 13/14 knees,
+    // 15/16 ankles.
     return [
-      [0, 1], [0, 4], [1, 2], [2, 3], [3, 7], [4, 5],
-      [5, 6], [6, 8], [9, 10], [11, 12], [11, 13], [11, 23],
-      [12, 14], [14, 16], [12, 24], [13, 15], [15, 17], [16, 18],
-      [16, 20], [15, 17], [15, 19], [15, 21], [16, 22], [17, 19],
-      [18, 20], [23, 25], [23, 24], [24, 26], [25, 27], [26, 28],
-      [27, 29], [28, 30], [27, 31], [28, 32], [29, 31], [30, 32],
+      [5, 7], [7, 9], [6, 8], [8, 10],   // arms
+      [5, 6], [5, 11], [6, 12], [11, 12], // torso
+      [11, 13], [13, 15], [12, 14], [14, 16], // legs
     ];
   }
 }
+
+// MoveNet always returns its 17 keypoints in this fixed order, so we can map an
+// index from the adjacency list back to a joint name to look it up in the map.
+const MOVENET_KEYPOINT_NAMES = [
+  'nose', 'left_eye', 'right_eye', 'left_ear', 'right_ear',
+  'left_shoulder', 'right_shoulder', 'left_elbow', 'right_elbow',
+  'left_wrist', 'right_wrist', 'left_hip', 'right_hip',
+  'left_knee', 'right_knee', 'left_ankle', 'right_ankle',
+];
 
 // The camera settings we'd LIKE: a high-resolution frame from a front-facing
 // camera. Every value is `ideal` (a wish, not a demand) so a camera that can't
@@ -268,18 +232,14 @@ export default function CameraView({ active, onPose }) {
 
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
-    // Always clear first so no stale frame lingers. When the overlay is hidden
-    // we stop right here: the canvas stays transparent and only the live video
-    // shows through. See SHOW_SKELETON_OVERLAY above for why it is hidden.
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    if (!SHOW_SKELETON_OVERLAY) return;
 
     // Draw the connecting lines (bones).
     ctx.lineWidth = 3;
     ctx.strokeStyle = '#38bdf8';
     for (const [i, j] of getSkeletonPairs()) {
-      const a = keypoints[BLAZEPOSE_KEYPOINT_NAMES[i]];
-      const b = keypoints[BLAZEPOSE_KEYPOINT_NAMES[j]];
+      const a = keypoints[MOVENET_KEYPOINT_NAMES[i]];
+      const b = keypoints[MOVENET_KEYPOINT_NAMES[j]];
       if (a && b && a.score >= DRAW_THRESHOLD && b.score >= DRAW_THRESHOLD) {
         ctx.beginPath();
         ctx.moveTo(a.x, a.y);
@@ -290,7 +250,7 @@ export default function CameraView({ active, onPose }) {
 
     // Draw the joints (dots) on top of the lines.
     ctx.fillStyle = '#f472b6';
-    for (const name of BLAZEPOSE_KEYPOINT_NAMES) {
+    for (const name of MOVENET_KEYPOINT_NAMES) {
       const kp = keypoints[name];
       if (kp && kp.score >= DRAW_THRESHOLD) {
         ctx.beginPath();
