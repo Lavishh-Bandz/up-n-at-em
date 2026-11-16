@@ -456,3 +456,224 @@
   font-size: 0.72rem;
   resize: vertical;
 }
+
+/* ---- Success screen: measured time ------------------------------------- */
+.success-time {
+  color: var(--text, #e2e8f0);
+  font-size: 1.1rem;
+  margin: 0.5rem auto 0;
+}
+
+.success-time strong {
+  color: var(--accent-2);
+}
+
+/* ---- Reusable hold-to-confirm button (HoldButton) ---------------------- */
+/* Mirrors the three-layer stacking of the emergency button: a dark base, a
+   growing fill above it, and the label on top so the text stays readable. */
+.hold-button {
+  position: relative;
+  overflow: hidden;
+  width: 100%;
+  background: #1f2937;
+  color: var(--text, #e2e8f0);
+  border: 1px solid var(--accent, #38bdf8);
+  border-radius: 12px;
+  padding: 0.8rem 1rem;
+  font-size: 1rem;
+  font-weight: 700;
+  cursor: pointer;
+  user-select: none;
+}
+
+.hold-fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  z-index: 1;
+  background: rgba(56, 189, 248, 0.3);
+  width: 0;
+  pointer-events: none;
+  transition: width 0.05s linear;
+}
+
+.hold-label {
+  position: relative;
+  z-index: 2;
+}
+
+/* ---- Daily progression controls (SettingsPanel) ------------------------ */
+.progression-controls {
+  margin-top: 1.5rem;
+  padding-top: 1rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.progression-targets {
+  margin: 0.25rem 0 0.75rem;
+}
+
+.progression-starting {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.progression-toggle {
+  display: block;
+  margin-bottom: 0.75rem;
+}
+
+.progression-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  align-items: flex-end;
+}
+
+.decrease-button {
+  background: #3a2a0d;
+  color: #fbbf24;
+  border: 1px solid #fbbf24;
+  border-radius: 10px;
+  padding: 0.6rem 0.9rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.decrease-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.starting-target-field {
+  display: flex;
+  flex-direction: column;
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
+/* ---- Deliberate skip-today (SettingsPanel) ----------------------------- */
+.skip-today {
+  margin-top: 1.5rem;
+  padding-top: 1rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.skip-caption {
+  color: var(--muted);
+  font-size: 0.85rem;
+  line-height: 1.4;
+  margin: 0.25rem 0 0.75rem;
+}
+
+.skip-confirmation {
+  color: var(--accent, #38bdf8);
+  font-weight: 600;
+  margin-top: 0.5rem;
+}
+
+/* ---- Tracker entry link ------------------------------------------------ */
+.tracker-link {
+  display: block;
+  width: 100%;
+  margin-top: 1rem;
+  background: transparent;
+  color: var(--accent, #38bdf8);
+  border: 1px solid var(--accent, #38bdf8);
+  border-radius: 10px;
+  padding: 0.6rem 1rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+/* ---- Progress / consistency tracker ------------------------------------ */
+.progress-tracker {
+  max-width: 34rem;
+  margin: 0 auto;
+}
+
+.tracker-streak {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  margin: 0.5rem 0 1.5rem;
+}
+
+.tracker-streak-number {
+  font-size: 2.5rem;
+  font-weight: 800;
+  color: var(--accent, #38bdf8);
+}
+
+.tracker-streak-label {
+  color: var(--muted);
+}
+
+.tracker-targets,
+.tracker-history,
+.tracker-bars {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 1rem;
+}
+
+.tracker-target-row {
+  padding: 0.3rem 0;
+}
+
+.tracker-target-meta {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.tracker-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.2rem 0;
+  font-size: 0.85rem;
+}
+
+.tracker-bar-date {
+  width: 6rem;
+  color: var(--muted);
+  flex: none;
+}
+
+.tracker-bar-track {
+  flex: 1;
+  height: 0.8rem;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.tracker-bar-fill {
+  display: block;
+  height: 100%;
+  background: var(--accent, #38bdf8);
+}
+
+.tracker-bar-value {
+  width: 2.5rem;
+  text-align: right;
+  flex: none;
+}
+
+.tracker-history-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.3rem 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.tracker-history-time {
+  color: var(--muted);
+}
+
+.tracker-empty {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
