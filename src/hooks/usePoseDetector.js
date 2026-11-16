@@ -4,17 +4,34 @@
 //
 // WHAT IT DOES, STEP BY STEP:
 //   1. Loads TensorFlow.js and tells it to use the fast WebGL backend (the GPU).
-//   2. Creates a MoveNet detector in "SinglePose Lightning" mode. Lightning is
-//      the small, fast model: perfect for counting one person's reps in real
-//      time in a browser.
+//   2. Creates a BlazePose detector using the pure-JS "tfjs" runtime. BlazePose
+//      is a 3D-capable model: for every frame it returns the usual 2D joints
+//      (pixel x/y + score) AND a 3D estimate ("keypoints3D") that includes
+//      DEPTH (how far each joint is toward/away from the camera). Depth is what
+//      lets us count a push-up from the front, where the body barely moves on
+//      screen but clearly moves toward/away from the lens.
+//        - modelType 'lite' is the DEFAULT here: BlazePose is heavier than the
+//          old MoveNet SinglePose-Lightning, and 'lite' keeps the per-frame
+//          cost low enough for a smooth requestAnimationFrame loop.
+//        - 'full' (and 'heavy') exist as higher-QUALITY fallbacks if accuracy
+//          ever matters more than frame rate; swap modelType to try them.
+//      Like MoveNet, the model WEIGHTS download from tfhub.dev on FIRST RUN in
+//      the browser (so first launch needs internet); this is a runtime-only
+//      download and does not affect the headless build.
 //   3. Starts a requestAnimationFrame loop. On every animation frame it asks
-//      the detector "where are this person's joints right now?" and stores the
-//      answer.
-//   4. Exposes the latest keypoints (keyed by MoveNet joint name, e.g.
-//      keypoints.left_elbow) plus a status string: 'loading' | 'ready' |
-//      'error'.
+//      the detector "where are this person's joints right now?", merges the 2D
+//      and 3D results into one name-keyed map (see keypointAdapter.js), and
+//      stores the answer.
+//   4. Exposes the latest keypoints (keyed by BlazePose joint name, e.g.
+//      keypoints.left_elbow — each entry carries pixel x/y + score AND a depth
+//      z) plus a status string: 'loading' | 'ready' | 'error'.
 //   5. Cleans everything up on unmount: cancels the animation loop and disposes
 //      the detector so the GPU memory is released.
+//
+// WHY THE tfjs RUNTIME (not the mediapipe one): the tfjs BlazePose runtime is
+// self-contained and does NOT import '@mediapipe/pose', so the existing
+// vite.config.js stub alias stays valid and the build stays clean. It also
+// reuses the WebGL backend we already set up below, same as MoveNet did.
 //
 // HEADLESS NOTE: this hook only does real work inside a browser with WebGL and
 // a camera. In a plain Node/test environment there is no window/rAF, so the
@@ -24,26 +41,10 @@ import { useEffect, useRef, useState } from 'react';
 import * as poseDetection from '@tensorflow-models/pose-detection';
 import * as tf from '@tensorflow/tfjs';
 import '@tensorflow/tfjs-backend-webgl';
+import { buildKeypointMap } from '../logic/keypointAdapter.js';
 
 /**
- * Turn MoveNet's array of keypoints into a plain object keyed by joint name,
- * so callers can do `keypoints.left_elbow` instead of searching an array.
- *
- * @param {Array<{name?:string, x:number, y:number, score?:number}>} keypoints
- * @returns {Object<string, {x:number, y:number, score:number}>}
- */
-function keypointsByName(keypoints) {
-  const map = {};
-  for (const kp of keypoints) {
-    if (kp && kp.name) {
-      map[kp.name] = kp;
-    }
-  }
-  return map;
-}
-
-/**
- * Run MoveNet on a video element.
+ * Run BlazePose on a video element.
  *
  * @param {React.RefObject<HTMLVideoElement>} videoRef  Ref to the <video> we read frames from.
  * @param {object} [options]
@@ -80,10 +81,11 @@ export function usePoseDetector(videoRef, { enabled = true, onPose } = {}) {
         await tf.setBackend('webgl');
         await tf.ready();
 
-        // Create the fast single-person detector.
+        // Create the single-person 3D detector. 'lite' keeps the rAF loop
+        // smooth; enableSmoothing softens frame-to-frame jitter in the joints.
         const detector = await poseDetection.createDetector(
-          poseDetection.SupportedModels.MoveNet,
-          { modelType: poseDetection.movenet.modelType.SINGLEPOSE_LIGHTNING }
+          poseDetection.SupportedModels.BlazePose,
+          { runtime: 'tfjs', modelType: 'lite', enableSmoothing: true }
         );
         if (cancelled) {
           detector.dispose();
@@ -110,8 +112,11 @@ export function usePoseDetector(videoRef, { enabled = true, onPose } = {}) {
                 flipHorizontal: false,
               });
               if (!cancelled) {
-                const map =
-                  poses && poses[0] ? keypointsByName(poses[0].keypoints) : {};
+                // Merge the 2D (pixel x/y + score) and 3D (depth z) results
+                // into one name-keyed map. See keypointAdapter.js for the exact
+                // shape and units (x/y pixels, z meters; smaller z = closer to
+                // the camera).
+                const map = poses && poses[0] ? buildKeypointMap(poses[0]) : {};
                 setKeypoints(map);
                 if (onPoseRef.current) onPoseRef.current(map);
               }

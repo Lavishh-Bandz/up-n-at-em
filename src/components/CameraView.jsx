@@ -21,35 +21,51 @@ import { usePoseDetector } from '../hooks/usePoseDetector.js';
 // the anti-cheat idea: faint guesses are not drawn.
 const DRAW_THRESHOLD = 0.3;
 
+// BlazePose always returns its 33 keypoints in this fixed order, so we can map
+// an index from the adjacency list back to a joint name to look it up in the
+// map. This order matches the library's BLAZEPOSE_KEYPOINTS constant.
+const BLAZEPOSE_KEYPOINT_NAMES = [
+  'nose',
+  'left_eye_inner', 'left_eye', 'left_eye_outer',
+  'right_eye_inner', 'right_eye', 'right_eye_outer',
+  'left_ear', 'right_ear',
+  'mouth_left', 'mouth_right',
+  'left_shoulder', 'right_shoulder',
+  'left_elbow', 'right_elbow',
+  'left_wrist', 'right_wrist',
+  'left_pinky', 'right_pinky',
+  'left_index', 'right_index',
+  'left_thumb', 'right_thumb',
+  'left_hip', 'right_hip',
+  'left_knee', 'right_knee',
+  'left_ankle', 'right_ankle',
+  'left_heel', 'right_heel',
+  'left_foot_index', 'right_foot_index',
+];
+
 // The pairs of joints that should be joined by a line to look like a skeleton.
-// We ask pose-detection for MoveNet's official adjacency list; if that ever
-// fails we fall back to a hand-written list so the overlay still works.
+// We ask pose-detection for BlazePose's official adjacency list; if that ever
+// fails we fall back to a hand-written list (BLAZEPOSE_CONNECTED_KEYPOINTS_PAIRS
+// from the library) so the overlay still draws.
 function getSkeletonPairs() {
   try {
-    // Returns pairs of keypoint INDEXES, e.g. [5, 7] = left_shoulder-left_elbow.
+    // Returns pairs of keypoint INDEXES, e.g. [11, 13] = left_shoulder-left_elbow.
     return poseDetection.util.getAdjacentPairs(
-      poseDetection.SupportedModels.MoveNet
+      poseDetection.SupportedModels.BlazePose
     );
   } catch {
-    // MoveNet keypoint index order (COCO): 0 nose, 1/2 eyes, 3/4 ears,
-    // 5/6 shoulders, 7/8 elbows, 9/10 wrists, 11/12 hips, 13/14 knees,
-    // 15/16 ankles.
+    // BlazePose's connected-keypoint pairs, by index into the 33-name list
+    // above: face, arms, hands, torso, legs and feet.
     return [
-      [5, 7], [7, 9], [6, 8], [8, 10],   // arms
-      [5, 6], [5, 11], [6, 12], [11, 12], // torso
-      [11, 13], [13, 15], [12, 14], [14, 16], // legs
+      [0, 1], [0, 4], [1, 2], [2, 3], [3, 7], [4, 5],
+      [5, 6], [6, 8], [9, 10], [11, 12], [11, 13], [11, 23],
+      [12, 14], [14, 16], [12, 24], [13, 15], [15, 17], [16, 18],
+      [16, 20], [15, 17], [15, 19], [15, 21], [16, 22], [17, 19],
+      [18, 20], [23, 25], [23, 24], [24, 26], [25, 27], [26, 28],
+      [27, 29], [28, 30], [27, 31], [28, 32], [29, 31], [30, 32],
     ];
   }
 }
-
-// MoveNet always returns its 17 keypoints in this fixed order, so we can map an
-// index from the adjacency list back to a joint name to look it up in the map.
-const MOVENET_KEYPOINT_NAMES = [
-  'nose', 'left_eye', 'right_eye', 'left_ear', 'right_ear',
-  'left_shoulder', 'right_shoulder', 'left_elbow', 'right_elbow',
-  'left_wrist', 'right_wrist', 'left_hip', 'right_hip',
-  'left_knee', 'right_knee', 'left_ankle', 'right_ankle',
-];
 
 // The camera settings we'd LIKE: a high-resolution frame from a front-facing
 // camera. Every value is `ideal` (a wish, not a demand) so a camera that can't
@@ -238,8 +254,8 @@ export default function CameraView({ active, onPose }) {
     ctx.lineWidth = 3;
     ctx.strokeStyle = '#38bdf8';
     for (const [i, j] of getSkeletonPairs()) {
-      const a = keypoints[MOVENET_KEYPOINT_NAMES[i]];
-      const b = keypoints[MOVENET_KEYPOINT_NAMES[j]];
+      const a = keypoints[BLAZEPOSE_KEYPOINT_NAMES[i]];
+      const b = keypoints[BLAZEPOSE_KEYPOINT_NAMES[j]];
       if (a && b && a.score >= DRAW_THRESHOLD && b.score >= DRAW_THRESHOLD) {
         ctx.beginPath();
         ctx.moveTo(a.x, a.y);
@@ -250,7 +266,7 @@ export default function CameraView({ active, onPose }) {
 
     // Draw the joints (dots) on top of the lines.
     ctx.fillStyle = '#f472b6';
-    for (const name of MOVENET_KEYPOINT_NAMES) {
+    for (const name of BLAZEPOSE_KEYPOINT_NAMES) {
       const kp = keypoints[name];
       if (kp && kp.score >= DRAW_THRESHOLD) {
         ctx.beginPath();
