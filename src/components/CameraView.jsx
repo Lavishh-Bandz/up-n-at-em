@@ -16,6 +16,7 @@
 import { useEffect, useRef, useState } from 'react';
 import * as poseDetection from '@tensorflow-models/pose-detection';
 import { usePoseDetector } from '../hooks/usePoseDetector.js';
+import { BLAZEPOSE_KEYPOINT_NAMES } from '../logic/keypointAdapter.js';
 
 // Only draw joints/lines the detector is reasonably sure about. This matches
 // the anti-cheat idea: faint guesses are not drawn.
@@ -23,25 +24,10 @@ const DRAW_THRESHOLD = 0.3;
 
 // BlazePose always returns its 33 keypoints in this fixed order, so we can map
 // an index from the adjacency list back to a joint name to look it up in the
-// map. This order matches the library's BLAZEPOSE_KEYPOINTS constant.
-const BLAZEPOSE_KEYPOINT_NAMES = [
-  'nose',
-  'left_eye_inner', 'left_eye', 'left_eye_outer',
-  'right_eye_inner', 'right_eye', 'right_eye_outer',
-  'left_ear', 'right_ear',
-  'mouth_left', 'mouth_right',
-  'left_shoulder', 'right_shoulder',
-  'left_elbow', 'right_elbow',
-  'left_wrist', 'right_wrist',
-  'left_pinky', 'right_pinky',
-  'left_index', 'right_index',
-  'left_thumb', 'right_thumb',
-  'left_hip', 'right_hip',
-  'left_knee', 'right_knee',
-  'left_ankle', 'right_ankle',
-  'left_heel', 'right_heel',
-  'left_foot_index', 'right_foot_index',
-];
+// map. We import the SAME ordered name list the keypoint adapter uses to key
+// the map (see keypointAdapter.js), so the overlay and the detector can never
+// drift apart: whatever name the adapter stored a joint under is the name we
+// look it up by here.
 
 // The pairs of joints that should be joined by a line to look like a skeleton.
 // We ask pose-detection for BlazePose's official adjacency list; if that ever
