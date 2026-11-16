@@ -203,6 +203,87 @@ describe('buildKeypointMap (BlazePose 2D + 3D adapter)', () => {
     expect(map.left_eye_inner.y).toBe(150);
   });
 
+  it('SYNTHESIZES pixel x/y from the 3D landmark when the 2D x/y are NULL (the live bug)', () => {
+    // THE REGRESSION TEST for the proven live shape: this tfjs BlazePose runtime
+    // returns every 2D keypoint with x:null, y:null (they still carry name +
+    // score) while the 3D keypoints3D list is fully populated. The adapter must
+    // rebuild a usable pixel x/y for each joint by projecting the 3D world
+    // landmark into screen space, so the overlay + every pixel-based measurement
+    // stop seeing null.
+    const twoD = poseByIndex(
+      {
+        nose: { x: null, y: null, score: 0.98 },
+        left_shoulder: { x: null, y: null, score: 0.96 },
+        right_shoulder: { x: null, y: null, score: 0.8 },
+      },
+      (name, _i, v) => ({ name, x: v.x, y: v.y, score: v.score })
+    );
+    const keypoints3D = BLAZEPOSE_KEYPOINT_NAMES.map((name, i) => {
+      if (i === IDX.nose) return kp3d(name, 0.0, -0.4, -0.2);
+      if (i === IDX.left_shoulder) return kp3d(name, 0.17, -0.01, -0.16);
+      if (i === IDX.right_shoulder) return kp3d(name, -0.17, 0.03, -0.13);
+      return kp3d(name, 0, 0, 0);
+    });
+    const pose = { keypoints: twoD.keypoints, keypoints3D };
+
+    // Hand in the real frame size the live dump reported.
+    const map = buildKeypointMap(pose, { width: 1920, height: 1080 });
+
+    // The null 2D x/y are replaced with finite projected pixels.
+    for (const joint of ['nose', 'left_shoulder', 'right_shoulder']) {
+      expect(Number.isFinite(map[joint].x)).toBe(true);
+      expect(Number.isFinite(map[joint].y)).toBe(true);
+    }
+
+    // The projection places body-center at mid-frame (960, 540) and scales
+    // meters by the frame height (1080). left_shoulder x3d 0.17 -> ~960+184.
+    expect(map.left_shoulder.x).toBeCloseTo(960 + 0.17 * 1080, 1);
+    expect(map.left_shoulder.y).toBeCloseTo(540 + -0.01 * 1080, 1);
+
+    // The shoulders project to DIFFERENT x's, so a pixel ruler (shoulder width)
+    // and the overlay have a real, non-degenerate geometry to work with.
+    expect(map.left_shoulder.x).not.toBeCloseTo(map.right_shoulder.x, 1);
+
+    // The true 3D fields are still attached for the depth-aware math.
+    expect(map.left_shoulder.z).toBeCloseTo(-0.16);
+    expect(map.left_shoulder.y3d).toBeCloseTo(-0.01);
+  });
+
+  it('PREFERS real 2D pixels over projection when the engine actually provides them', () => {
+    // If a build/runtime ever returns real finite pixel x/y, we must use those
+    // exactly and NOT overwrite them with the projection.
+    const twoD = poseByIndex(
+      {
+        left_shoulder: { x: 123, y: 456, score: 0.9 },
+      },
+      (name, _i, v) => ({ name, x: v.x, y: v.y, score: v.score })
+    );
+    const keypoints3D = BLAZEPOSE_KEYPOINT_NAMES.map((name, i) => {
+      if (i === IDX.left_shoulder) return kp3d(name, 0.2, -0.3, -0.05);
+      return kp3d(name, 0, 0, 0);
+    });
+    const pose = { keypoints: twoD.keypoints, keypoints3D };
+
+    const map = buildKeypointMap(pose, { width: 1920, height: 1080 });
+
+    // Real pixels kept verbatim; depth still attached from 3D.
+    expect(map.left_shoulder.x).toBe(123);
+    expect(map.left_shoulder.y).toBe(456);
+    expect(map.left_shoulder.z).toBeCloseTo(-0.05);
+  });
+
+  it('leaves x/y null when BOTH the 2D pixels and the 3D landmark are unusable', () => {
+    // No real pixels AND no projectable 3D point -> we cannot invent a position,
+    // so x/y stay null and downstream null-guards simply skip the joint.
+    const pose = {
+      keypoints: [{ name: 'nose', x: null, y: null, score: 0.9 }],
+      // no keypoints3D at all
+    };
+    const map = buildKeypointMap(pose, { width: 1920, height: 1080 });
+    expect(map.nose.x).toBeNull();
+    expect(map.nose.y).toBeNull();
+  });
+
   it('returns an empty map for a missing or malformed pose', () => {
     // Graceful: no pose, or no keypoints array -> {} so callers can skip the
     // frame instead of blowing up.

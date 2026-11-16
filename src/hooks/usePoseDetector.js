@@ -21,10 +21,15 @@
 //   3. Starts a requestAnimationFrame loop. On every animation frame it asks
 //      the detector "where are this person's joints right now?", merges the 2D
 //      and 3D results into one name-keyed map (see keypointAdapter.js), and
-//      stores the answer.
+//      stores the answer. IMPORTANT: a live raw dump proved this tfjs BlazePose
+//      runtime returns the 2D pixel x/y as NULL while the 3D world landmarks are
+//      complete, so the adapter projects those 3D landmarks into screen pixels
+//      (it needs the video size, which we pass in below) to rebuild a usable
+//      x/y for every joint.
 //   4. Exposes the latest keypoints (keyed by BlazePose joint name, e.g.
-//      keypoints.left_elbow — each entry carries pixel x/y + score AND a depth
-//      z) plus a status string: 'loading' | 'ready' | 'error'.
+//      keypoints.left_elbow, each entry carrying pixel x/y (real when present,
+//      otherwise projected from 3D) + score AND a depth z) plus a status string:
+//      'loading' | 'ready' | 'error'.
 //   5. Cleans everything up on unmount: cancels the animation loop and disposes
 //      the detector so the GPU memory is released.
 //
@@ -70,16 +75,6 @@ export function usePoseDetector(videoRef, { enabled = true, onPose } = {}) {
   const onPoseRef = useRef(onPose);
   onPoseRef.current = onPose;
 
-  // DIAGNOSTIC (temporary): a one-shot guard so we dump the RAW model output to
-  // the console exactly ONCE per mount, not every animation frame. Two earlier
-  // fix attempts failed with the same fingerprint (bodyScalePx null while
-  // depthScaleM has a value), which means our assumptions about the shape
-  // BlazePose's tfjs runtime actually returns are wrong. Rather than guess a
-  // third time, we print the first real pose BEFORE buildKeypointMap touches it
-  // so the user can copy the ground truth back to us. Flipping this ref to true
-  // the first time silences the dump for the rest of the session.
-  const rawDumpedRef = useRef(false);
-
   useEffect(() => {
     if (!enabled) return undefined;
 
@@ -121,66 +116,22 @@ export function usePoseDetector(videoRef, { enabled = true, onPose } = {}) {
                 maxPoses: 1,
                 flipHorizontal: false,
               });
-              // DIAGNOSTIC (temporary): on the FIRST frame that actually
-              // returns a pose, print the raw result exactly as the model gave
-              // it to us, BEFORE buildKeypointMap reshapes anything. We log the
-              // array-ness + lengths of both lists, the full raw nose (index 0)
-              // and both shoulders (indexes 11 + 12) from the 2D list, the two
-              // raw shoulders from the 3D list, and the video size at this exact
-              // moment. videoWidth/videoHeight matter because the 2D x/y come
-              // back as NORMALIZED 0..1 values multiplied by the video size, so
-              // if the video reports 0x0 here every 2D x/y collapses to 0 and
-              // the pixel ruler (bodyScalePx) would read null while the 3D
-              // world landmarks (meters, size-independent) still work. The dump
-              // is wrapped in its own try/catch so a logging slip can never
-              // disturb the detection loop. (The "countdown counts down even
-              // when not in position" symptom is almost certainly the SAME root
-              // cause: the arming gate is fed confidence derived from these 2D
-              // keypoints, so if the 2D side is broken the gate misbehaves. We
-              // will re-check that once this dump reveals the real 2D shape.)
-              if (!rawDumpedRef.current && poses && poses[0]) {
-                rawDumpedRef.current = true;
-                try {
-                  const rawPose = poses[0];
-                  const kp = rawPose.keypoints;
-                  const kp3d = rawPose.keypoints3D;
-                  const snapshot = {
-                    keypointsIsArray: Array.isArray(kp),
-                    keypointsLength: Array.isArray(kp) ? kp.length : null,
-                    keypoints3DIsArray: Array.isArray(kp3d),
-                    keypoints3DLength: Array.isArray(kp3d) ? kp3d.length : null,
-                    poseScore: rawPose.score,
-                    // Full raw 2D entries for nose + both shoulders (by index).
-                    keypoints_0_nose: Array.isArray(kp) ? kp[0] : null,
-                    keypoints_11_left_shoulder: Array.isArray(kp) ? kp[11] : null,
-                    keypoints_12_right_shoulder: Array.isArray(kp) ? kp[12] : null,
-                    // Full raw 3D entries for both shoulders (by index).
-                    keypoints3D_11_left_shoulder: Array.isArray(kp3d) ? kp3d[11] : null,
-                    keypoints3D_12_right_shoulder: Array.isArray(kp3d) ? kp3d[12] : null,
-                    // Video size right now: the multiplier for the 2D pixels.
-                    videoWidth: video.videoWidth,
-                    videoHeight: video.videoHeight,
-                  };
-                  // One stable, greppable label + JSON so the user can copy it.
-                  console.log(
-                    '[UP N AT EM] RAW BLAZEPOSE FRAME',
-                    JSON.stringify(snapshot)
-                  );
-                } catch (dumpErr) {
-                  // Never let the diagnostic break detection; just note it.
-                  console.log(
-                    '[UP N AT EM] RAW BLAZEPOSE FRAME dump failed',
-                    String(dumpErr)
-                  );
-                }
-              }
 
               if (!cancelled) {
-                // Merge the 2D (pixel x/y + score) and 3D (depth z) results
-                // into one name-keyed map. See keypointAdapter.js for the exact
-                // shape and units (x/y pixels, z meters; smaller z = closer to
-                // the camera).
-                const map = poses && poses[0] ? buildKeypointMap(poses[0]) : {};
+                // Merge the 2D and 3D results into one name-keyed map. We hand
+                // in the video's real pixel size because this BlazePose tfjs
+                // runtime returns the 2D x/y as NULL (proven by a live raw
+                // dump), so the adapter PROJECTS the working 3D world landmarks
+                // into screen pixels using the frame size. See keypointAdapter.js
+                // for the exact shape and units (x/y pixels, real when present,
+                // otherwise projected from 3D; z meters, smaller = closer).
+                const map =
+                  poses && poses[0]
+                    ? buildKeypointMap(poses[0], {
+                        width: video.videoWidth,
+                        height: video.videoHeight,
+                      })
+                    : {};
                 setKeypoints(map);
                 if (onPoseRef.current) onPoseRef.current(map);
               }
