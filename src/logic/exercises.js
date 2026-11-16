@@ -106,6 +106,16 @@ export const EXERCISES = {
       ...DEFAULT_POSTURE_CONFIG,
       wristStationaryFraction: 0.2,
     },
+    // SUSTAINED-DIP requirement for the vertical rep counter. A real push-up dip
+    // spans several camera frames, so we require the body to STAY past the down
+    // threshold for at least this many confident frames before a completing
+    // up-transition counts. This is belt-and-braces on top of the outlier
+    // validator (upperBodySignal.createUpperBodySignalValidator): even if a
+    // stray glitch frame sneaks past the validator, a single down frame that
+    // immediately pops back up cannot fake a rep. Kept small (2) so a genuine,
+    // even fairly quick, push-up still counts — at a typical ~16-60ms/frame a
+    // real dip is many frames long.
+    minDownFrames: 2,
     sides: {
       // Push-ups need only the chosen side's SHOULDER: it is both the vertical
       // signal and the anchor for the body-scale ruler. We deliberately do NOT

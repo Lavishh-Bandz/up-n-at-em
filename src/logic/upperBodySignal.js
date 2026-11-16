@@ -144,6 +144,165 @@ export function measureUpperBodyY(keypointsByName, side) {
 }
 
 // -----------------------------------------------------------------------------
+// OUTLIER / INVALID-FRAME VALIDATOR (the main fix in this pass)
+// -----------------------------------------------------------------------------
+// WHY THIS EXISTS (the live bug, proven by the user's diagnostics):
+//   MoveNet sometimes LOSES the tracked shoulder/nose on a side-view floor
+//   push-up and emits GARBAGE coordinates for them. The user's own console log
+//   shows upperBodyY jumping from a sane ~558px to NEGATIVE / impossible values
+//   (-39, -64) and teleporting hundreds of pixels frame-to-frame (0 -> 504)
+//   between ~200ms samples. The push-up signal was trusted blindly, so a single
+//   garbage frame produced a huge excursion spike (the log shows 3.764 and
+//   1.569) that blew past downFraction, and the next frame "rose" back up —
+//   counting a full rep that never happened. Nine phantom reps in one run.
+//
+//   The counter is not wrong: it is faithfully counting detector NOISE. The fix
+//   is to REJECT a frame's upperBodyY reading BEFORE it reaches the counter when
+//   the reading is physically implausible, and to treat a rejected frame exactly
+//   like a not-confident frame (do not count, do not advance, do not tick the
+//   arming countdown).
+//
+// TWO PLAUSIBILITY RULES (both body-relative where it matters):
+//
+//   RULE 1 — IN-RANGE PIXELS: a real keypoint y is a pixel row on the video, so
+//   it can never be negative and can never sit outside the frame. upperBodyY of
+//   -39 / -64 is impossible. We reject any y that is non-finite, negative, or
+//   (when the caller knows the video height) beyond the bottom of the frame. If
+//   the frame height is unknown we still reject the clearly-impossible negatives
+//   and absurdly large values via a generous cap, so a teleport to a wild pixel
+//   value is caught even without exact bounds.
+//
+//   RULE 2 — NO TELEPORT: a human upper body cannot move most of its own
+//   body-scale in a single ~16-60ms frame. We remember the previous ACCEPTED y
+//   and reject a frame whose y jumped more than `maxJumpFraction` of a
+//   body-scale since then. Using the LOCKED bodyScalePx makes this threshold
+//   body-relative (near or far from the camera behave the same). A jump from
+//   ~0px to 504px against a ~255px ruler is ~2.0 body-scales in one frame — far
+//   past any real movement — so it is rejected.
+//
+// HONEST TRADE-OFFS:
+//   - We only START the teleport check once we have a previous accepted y, so
+//     the very first usable frame is always allowed through (it just seeds the
+//     memory). A real rep's frame-to-frame travel is a small fraction of a
+//     body-scale, so a generous maxJumpFraction (0.75 by default) rejects
+//     teleports while never touching a genuine dip.
+//   - Rejecting a frame does NOT reset the rep counter or the baseline; it just
+//     skips the frame. The next plausible frame continues from where we were,
+//     exactly like a camera blink (not-confident) frame.
+//
+// PURITY: this is a pure factory (createUpperBodySignalValidator) with
+// update()/reset(), no DOM and no Date.now(). The previous-y memory lives inside
+// it so tests stay deterministic (same pattern as positionGate.js).
+
+/**
+ * Default tuning for the outlier validator. Exposed so callers/tests can share
+ * (and live-tune) the same numbers.
+ */
+export const DEFAULT_SIGNAL_VALIDATOR_CONFIG = {
+  // RULE 2: the biggest per-frame jump in upperBodyY, as a fraction of the
+  // body-scale, that we will still accept as real human movement. Anything
+  // bigger is a detector teleport. 0.75 of a shoulder-width in one frame is
+  // already faster than any real push-up, so this rejects the garbage while
+  // leaving a genuine ~0.2 dip (spread over several frames) untouched.
+  maxJumpFraction: 0.75,
+  // RULE 1 (no-bounds fallback): when the caller does not know the video height
+  // we still reject an absurdly large y via this hard pixel cap, so a teleport
+  // to a wild value is caught even without exact frame bounds. Real webcam
+  // frames are well under this.
+  maxPlausibleY: 5000,
+};
+
+/**
+ * Create a pure validator that decides whether a single frame's upper-body y
+ * reading is PLAUSIBLE (should be counted) or an OUTLIER (should be skipped).
+ *
+ * Call update() once per frame with the y the signal path produced, the ruler
+ * (bodyScalePx) in use, and optionally the video frame height so RULE 1 can use
+ * exact bounds. It returns a small result object:
+ *
+ *   { ok: boolean, reason: (string|null) }
+ *
+ * where ok === true means "trust this frame" and ok === false means "reject it
+ * like a not-confident frame". `reason` is a short human-readable tag for the
+ * debug readout so the user can SEE the garbage being filtered live
+ * ('negative', 'out-of-frame', 'teleport', 'invalid').
+ *
+ * @param {object} [config]  Tuning (see DEFAULT_SIGNAL_VALIDATOR_CONFIG).
+ * @returns {{
+ *   update: (currentY:number, bodyScalePx:number, frameHeight?:number) => {ok:boolean, reason:(string|null)},
+ *   reset: () => void
+ * }}
+ */
+export function createUpperBodySignalValidator(config = {}) {
+  const cfg = { ...DEFAULT_SIGNAL_VALIDATOR_CONFIG, ...config };
+
+  // The last y we ACCEPTED, so RULE 2 can measure a frame-to-frame jump. Null
+  // until the first plausible frame seeds it.
+  let prevAcceptedY = null;
+
+  return {
+    /**
+     * Validate one frame's upper-body y.
+     *
+     * @param {number} currentY     The y the signal path produced this frame.
+     * @param {number} bodyScalePx  The body-scale ruler (pixels) in use.
+     * @param {number} [frameHeight] Optional video height so RULE 1 can reject
+     *                               anything past the bottom of the frame.
+     * @returns {{ok:boolean, reason:(string|null)}}
+     */
+    update(currentY, bodyScalePx, frameHeight) {
+      // A missing / non-numeric reading is not countable. We do NOT touch the
+      // accepted-y memory, so the next real frame still compares against the
+      // last good value rather than a gap.
+      if (typeof currentY !== 'number' || !Number.isFinite(currentY)) {
+        return { ok: false, reason: 'invalid' };
+      }
+
+      // RULE 1a: a pixel row can never be negative. -39 / -64 are impossible.
+      if (currentY < 0) {
+        return { ok: false, reason: 'negative' };
+      }
+
+      // RULE 1b: reject anything past the bottom of the frame when we know the
+      // height, otherwise fall back to the generous hard cap.
+      if (typeof frameHeight === 'number' && frameHeight > 0) {
+        if (currentY > frameHeight) {
+          return { ok: false, reason: 'out-of-frame' };
+        }
+      } else if (currentY > cfg.maxPlausibleY) {
+        return { ok: false, reason: 'out-of-frame' };
+      }
+
+      // RULE 2: reject a physically-impossible teleport since the last accepted
+      // frame, measured as a fraction of the body-scale. Needs a usable ruler
+      // and a previous accepted y; without a ruler we cannot judge the jump, so
+      // we skip RULE 2 (RULE 1 already caught the impossible values).
+      if (
+        prevAcceptedY !== null &&
+        typeof bodyScalePx === 'number' &&
+        bodyScalePx > 0
+      ) {
+        const jump = Math.abs(currentY - prevAcceptedY);
+        if (jump / bodyScalePx > cfg.maxJumpFraction) {
+          // A teleport. Deliberately do NOT update prevAcceptedY: we keep the
+          // last GOOD value so a lone garbage frame cannot drag our reference.
+          return { ok: false, reason: 'teleport' };
+        }
+      }
+
+      // Plausible: remember it as the new reference and accept the frame.
+      prevAcceptedY = currentY;
+      return { ok: true, reason: null };
+    },
+
+    /** Forget the accepted-y memory (e.g. when a new step begins). */
+    reset() {
+      prevAcceptedY = null;
+    },
+  };
+}
+
+// -----------------------------------------------------------------------------
 // ANTI-STANDING GUARD (upper-body only)
 // -----------------------------------------------------------------------------
 // WHY THIS EXISTS (the live bug):

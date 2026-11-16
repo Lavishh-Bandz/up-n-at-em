@@ -5,7 +5,9 @@ import {
   isPushupPosture,
   createPostureGuard,
   createBodyScaleTracker,
+  createUpperBodySignalValidator,
   DEFAULT_POSTURE_CONFIG,
+  DEFAULT_SIGNAL_VALIDATOR_CONFIG,
 } from '../upperBodySignal.js';
 
 // Small helper to build a keypoint quickly.
@@ -296,5 +298,103 @@ describe('createBodyScaleTracker (stable locked ruler)', () => {
     tracker.reset();
     expect(tracker.locked).toBe(false);
     expect(tracker.scale).toBeNull();
+  });
+});
+
+describe('createUpperBodySignalValidator (rejects garbage MoveNet frames)', () => {
+  // Body-scale ruler used throughout. 100px keeps the jump math easy: a jump of
+  // N px is N/100 of a body-scale.
+  const RULER = 100;
+
+  it('accepts a sane in-range reading and seeds the teleport memory', () => {
+    const v = createUpperBodySignalValidator();
+    const r = v.update(558, RULER); // the user's sane starting value
+    expect(r.ok).toBe(true);
+    expect(r.reason).toBeNull();
+  });
+
+  it('REJECTS a negative upperBodyY (impossible pixel row) like the logged -39/-64', () => {
+    const v = createUpperBodySignalValidator();
+    v.update(558, RULER); // a good frame first
+    expect(v.update(-39, RULER)).toEqual({ ok: false, reason: 'negative' });
+    expect(v.update(-64, RULER)).toEqual({ ok: false, reason: 'negative' });
+  });
+
+  it('REJECTS a reading past the bottom of the frame when the height is known', () => {
+    const v = createUpperBodySignalValidator();
+    v.update(300, RULER);
+    // Frame is 480px tall; 999 is off the bottom edge.
+    expect(v.update(999, RULER, 480)).toEqual({
+      ok: false,
+      reason: 'out-of-frame',
+    });
+  });
+
+  it('REJECTS an absurd value via the hard cap when the frame height is unknown', () => {
+    const v = createUpperBodySignalValidator();
+    v.update(300, RULER);
+    const huge = DEFAULT_SIGNAL_VALIDATOR_CONFIG.maxPlausibleY + 1;
+    expect(v.update(huge, RULER)).toEqual({ ok: false, reason: 'out-of-frame' });
+  });
+
+  it('REJECTS a teleport bigger than maxJumpFraction of a body-scale', () => {
+    const v = createUpperBodySignalValidator(); // default maxJumpFraction 0.75
+    v.update(0, RULER); // accepted, seeds memory at y=0
+    // A jump from 0 to 504 against a 255px ruler is ~2.0 body-scales -> teleport.
+    expect(v.update(504, 255)).toEqual({ ok: false, reason: 'teleport' });
+  });
+
+  it('keeps the LAST GOOD y as the reference so one teleport does not drag it', () => {
+    const v = createUpperBodySignalValidator();
+    expect(v.update(300, RULER).ok).toBe(true); // reference = 300
+    expect(v.update(600, RULER).ok).toBe(false); // teleport (+300 = 3.0 scale)
+    // A sane frame near the LAST GOOD value (300) is accepted, proving the
+    // teleport did not move the reference to 600.
+    expect(v.update(320, RULER).ok).toBe(true);
+  });
+
+  it('ACCEPTS a realistic per-frame dip (small fraction of a body-scale)', () => {
+    const v = createUpperBodySignalValidator();
+    // A real push-up descends gradually: ~15px/frame against a 255px ruler is
+    // ~0.06 of a body-scale, well under 0.75.
+    let y = 558;
+    expect(v.update(y, 255).ok).toBe(true);
+    for (let i = 0; i < 5; i += 1) {
+      y += 15;
+      expect(v.update(y, 255).ok).toBe(true);
+    }
+  });
+
+  it('skips the teleport check when there is no ruler (RULE 1 still applies)', () => {
+    const v = createUpperBodySignalValidator();
+    v.update(300, null); // no ruler -> cannot judge a jump, but y is in range
+    // Big change but no ruler to measure it against -> accepted (RULE 1 ok).
+    expect(v.update(900, null).ok).toBe(true);
+    // A negative is still rejected regardless of ruler.
+    expect(v.update(-5, null)).toEqual({ ok: false, reason: 'negative' });
+  });
+
+  it('treats a non-numeric / NaN reading as invalid without dropping the reference', () => {
+    const v = createUpperBodySignalValidator();
+    expect(v.update(300, RULER).ok).toBe(true);
+    expect(v.update(null, RULER)).toEqual({ ok: false, reason: 'invalid' });
+    expect(v.update(NaN, RULER)).toEqual({ ok: false, reason: 'invalid' });
+    // The reference is still 300, so a nearby frame is accepted.
+    expect(v.update(305, RULER).ok).toBe(true);
+  });
+
+  it('reset() forgets the accepted-y memory for a new step', () => {
+    const v = createUpperBodySignalValidator();
+    v.update(300, RULER);
+    v.reset();
+    // After reset the first frame always seeds fresh memory, so a value far
+    // from the old reference is accepted (no history to compare against).
+    expect(v.update(900, RULER).ok).toBe(true);
+  });
+
+  it('exposes tunable default config', () => {
+    expect(typeof DEFAULT_SIGNAL_VALIDATOR_CONFIG.maxJumpFraction).toBe('number');
+    expect(DEFAULT_SIGNAL_VALIDATOR_CONFIG.maxJumpFraction).toBeGreaterThan(0);
+    expect(typeof DEFAULT_SIGNAL_VALIDATOR_CONFIG.maxPlausibleY).toBe('number');
   });
 });

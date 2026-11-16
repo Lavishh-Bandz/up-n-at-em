@@ -52,6 +52,8 @@ export default function DebugReadout({ debug, report }) {
     armed,
     phase,
     postureOk,
+    rejected, // was this frame's reading thrown out as a detector outlier?
+    rejectReason, // why ('negative' / 'out-of-frame' / 'teleport' / 'invalid')
     reps,
   } = debug;
 
@@ -70,6 +72,14 @@ export default function DebugReadout({ debug, report }) {
         {bodyScaleLocked ? '(locked)' : '(live)'}
       </div>
       <div className="debug-line">upperY: {fmtPx(upperBodyY)}</div>
+      <div className="debug-line">
+        reading:{' '}
+        {rejected ? (
+          <strong>REJECTED ({rejectReason ?? 'outlier'})</strong>
+        ) : (
+          'ok'
+        )}
+      </div>
       <div className="debug-line">confident: {confident ? 'yes' : 'no'}</div>
       <div className="debug-line">armed: {armed ? 'yes' : 'no'}</div>
       <div className="debug-line">phase: {phase ?? '—'}</div>

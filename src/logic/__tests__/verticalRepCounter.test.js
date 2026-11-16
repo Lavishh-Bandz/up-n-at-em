@@ -266,6 +266,57 @@ describe('createVerticalRepCounter', () => {
   });
 });
 
+// minDownFrames requires the dip to PERSIST for several confident frames before
+// a completing up-transition counts, so a single stray spike cannot fake a rep.
+describe('createVerticalRepCounter minDownFrames (sustained-dip requirement)', () => {
+  const makeSustained = () =>
+    createVerticalRepCounter({
+      downFraction: 0.2,
+      upFraction: 0.1,
+      minDownFrames: 2,
+    });
+
+  it('does NOT count a one-frame spike that pops straight back up', () => {
+    const counter = makeSustained();
+    counter.update(200, 100, true); // baseline
+    // A lone spike: one frame deep (enter 'down'), next frame already back up.
+    counter.update(260, 100, true); // excursion 0.6 -> down (1 down frame)
+    counter.update(202, 100, true); // excursion 0.02 -> up, but only 1 down frame
+    expect(counter.reps).toBe(0); // sustained-dip requirement blocks it
+    expect(counter.phase).toBe('up');
+  });
+
+  it('DOES count a dip that persists for at least minDownFrames frames', () => {
+    const counter = makeSustained();
+    counter.update(200, 100, true); // baseline
+    counter.update(240, 100, true); // down frame 1 (excursion 0.4)
+    counter.update(238, 100, true); // down frame 2 (still past upFraction)
+    counter.update(202, 100, true); // up -> rep counts (dip lasted 2 frames)
+    expect(counter.reps).toBe(1);
+    expect(counter.phase).toBe('up');
+  });
+
+  it('defaults to minDownFrames=1 so existing one-down-frame reps still count', () => {
+    const counter = createVerticalRepCounter({
+      downFraction: 0.2,
+      upFraction: 0.1,
+    });
+    counter.update(200, 100, true); // baseline
+    counter.update(230, 100, true); // single down frame
+    counter.update(205, 100, true); // up -> rep (default behavior unchanged)
+    expect(counter.reps).toBe(1);
+  });
+
+  it('an unconfident frame does not count toward the sustained-dip frames', () => {
+    const counter = makeSustained();
+    counter.update(200, 100, true); // baseline
+    counter.update(240, 100, true); // down frame 1
+    counter.update(238, 100, false); // ignored: NOT a confident down frame
+    counter.update(202, 100, true); // up, but only 1 confident down frame
+    expect(counter.reps).toBe(0);
+  });
+});
+
 // The posture guard reaches the counter as the 4th `postureOk` argument. These
 // tests prove the anti-standing guard actually blocks counting at the FSM.
 describe('createVerticalRepCounter anti-standing posture gate', () => {

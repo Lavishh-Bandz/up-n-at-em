@@ -31,6 +31,7 @@ import {
   measureUpperBodyY,
   createBodyScaleTracker,
   createPostureGuard,
+  createUpperBodySignalValidator,
 } from '../logic/upperBodySignal.js';
 import { createPositionGate } from '../logic/positionGate.js';
 import { createStatusDebouncer } from '../logic/statusDebounce.js';
@@ -77,6 +78,9 @@ function makeCounterForStep(step) {
       downFraction: preset.downFraction,
       upFraction: preset.upFraction,
       minConfidence: MIN_CONFIDENCE,
+      // Require the dip to persist for a few frames so a single stray glitch
+      // frame cannot complete a phantom rep (see the pushup descriptor).
+      minDownFrames: getExercise('pushup').minDownFrames,
     });
   }
   return createRepCounter({
@@ -146,6 +150,15 @@ export default function WorkoutSession({
     postureGuardRef.current = createPostureGuard(
       getExercise('pushup').postureGuard
     );
+  }
+  // PUSH-UP ONLY: the OUTLIER VALIDATOR. Each frame it decides whether the
+  // upper-body y reading is physically plausible (in-frame, no teleport) or
+  // garbage that MoveNet emitted after losing the joint. A rejected frame is
+  // treated exactly like a not-confident frame: it does not count, does not
+  // advance the FSM, and does not tick the arming countdown. Reset per step.
+  const signalValidatorRef = useRef(null);
+  if (signalValidatorRef.current === null) {
+    signalValidatorRef.current = createUpperBodySignalValidator();
   }
   // PUSH-UP ONLY: the "click Begin -> leave a report" diagnostics recorder. It
   // starts recording when a push-up step arms and is read back via the debug
@@ -293,7 +306,7 @@ export default function WorkoutSession({
     // You only truly count when BOTH the required joints are clearly visible AND
     // the body meets the exercise's orientation expectation (always true for
     // push-ups, a lenient horizontal check for sit-ups).
-    const isConfident = jointsConfident && orientationOk;
+    const jointAndOrientationOk = jointsConfident && orientationOk;
 
     // A single frame timestamp used by both the arming gate and the warning
     // debouncer below. Prefer performance.now(); fall back to Date.now().
@@ -301,6 +314,42 @@ export default function WorkoutSession({
       typeof performance !== 'undefined' && performance.now
         ? performance.now()
         : Date.now();
+
+    // PUSH-UP OUTLIER CHECK (runs every push-up frame, armed or not). MoveNet
+    // can lose the shoulder/nose on a side-view floor push-up and emit GARBAGE
+    // upperBodyY (negative, off-frame, or teleporting hundreds of px between
+    // frames). Those frames must be treated like a camera blink: they must NOT
+    // count a rep AND must NOT tick the get-into-position countdown, otherwise
+    // the counter counts noise and the countdown arms on noise. We compute the
+    // y + ruler the SAME way the counting path does, then ask the validator.
+    // For sit-ups there is no vertical signal, so the frame is always "valid"
+    // here and the sit-up path is untouched.
+    let pushupFrameValid = true; // true for sit-ups and for plausible push-up frames
+    let pushupRejectReason = null; // short tag for the debug readout when rejected
+    let pushupCurrentY = null; // the plausible y (reused by the counting path below)
+    let pushupScale = null; // the ruler used this frame (reused below)
+    if (step.exercise === 'pushup') {
+      pushupCurrentY = measureUpperBodyY(keypoints, side);
+      // Prefer the locked ruler once armed; during arming fall back to the live
+      // shoulder-width so RULE 2 (teleport, body-relative) still has a ruler.
+      const liveScale = measureBodyScale(keypoints);
+      pushupScale = bodyScaleTrackerRef.current.locked
+        ? bodyScaleTrackerRef.current.scale
+        : liveScale;
+      // Validate (frame height is not plumbed through handlePose, so the
+      // validator uses its negative + hard-cap fallback for RULE 1b).
+      const verdict = signalValidatorRef.current.update(
+        pushupCurrentY,
+        pushupScale
+      );
+      pushupFrameValid = verdict.ok;
+      pushupRejectReason = verdict.reason;
+    }
+
+    // The per-frame "trust this frame" flag. For push-ups a rejected outlier
+    // frame drops confidence to false here, so BOTH the arming countdown and the
+    // rep counter skip it exactly like a not-detected frame.
+    const isConfident = jointAndOrientationOk && pushupFrameValid;
 
     // Debounce the value used for the HUD WARNING ONLY. Good news (detected)
     // shows instantly; the "not detected" warning only appears after the pose
@@ -366,8 +415,40 @@ export default function WorkoutSession({
       // re-renders when the integer second changes) and a "paused" flag for
       // when the countdown has started (some time banked) but the user is
       // currently OUT of position, so the HUD can tell them to get back.
+      //
+      // READY-POSITION CORRECTNESS: the countdown only ticks on a CONFIDENT
+      // frame (see positionGate.update(isConfident, ...)). For push-ups
+      // isConfident now also requires the outlier validator to accept the
+      // frame, so a garbage/teleport reading pauses the countdown instead of
+      // arming on noise. We also show a throttled push-up debug readout WHILE
+      // arming (previously the panel only appeared after arming) so the user
+      // can watch the ready-position detection — including a 'rejected' flag and
+      // the reason — and confirm the countdown is only advancing when genuinely
+      // in position.
       updateCountdownSeconds(remainingSeconds);
       updatePaused(heldMs > 0 && !isConfident);
+      if (step.exercise === 'pushup') {
+        const armingReadout = {
+          excursion: null,
+          rawExcursion: null,
+          downFraction: null,
+          upFraction: null,
+          bodyScalePx: pushupScale,
+          bodyScaleLocked: bodyScaleTrackerRef.current.locked,
+          upperBodyY: pushupCurrentY,
+          confident: isConfident,
+          armed: false,
+          phase: 'arming',
+          postureOk: null,
+          // The headline for the ready-position phase: was this frame's reading
+          // rejected as an outlier, and why? A rejected frame does NOT tick the
+          // countdown (it dropped isConfident to false above).
+          rejected: !pushupFrameValid,
+          rejectReason: pushupRejectReason,
+          reps: 0,
+        };
+        maybeUpdateDebug(nowMs, armingReadout, diagnosticsRef.current.report);
+      }
       return;
     }
 
@@ -388,14 +469,10 @@ export default function WorkoutSession({
     //    advancing — a null-guarded skip can never nudge the counter.
     if (step.exercise === 'pushup') {
       // --- PUSH-UP: upper-body vertical movement ---
-      const currentY = measureUpperBodyY(keypoints, side);
-      // Use the LOCKED stable ruler captured during arming. If the lock failed
-      // (e.g. no confident frame during the hold), fall back to the live
-      // measurement for this frame so counting is not stranded.
-      const liveScale = measureBodyScale(keypoints);
-      const bodyScalePx = bodyScaleTrackerRef.current.locked
-        ? bodyScaleTrackerRef.current.scale
-        : liveScale;
+      // Reuse the y + ruler already measured for the outlier check above (same
+      // values, so the validator and the counter never disagree).
+      const currentY = pushupCurrentY;
+      const bodyScalePx = pushupScale;
       if (currentY == null || bodyScalePx == null) {
         updateDisplayConfident(statusDebouncerRef.current.update(false, nowMs));
         return;
@@ -437,6 +514,13 @@ export default function WorkoutSession({
         armed: isArmed,
         phase: dbg.phase,
         postureOk,
+        // Surface whether this frame's reading was REJECTED as an outlier so the
+        // user can watch the garbage being filtered live. A rejected frame
+        // still reaches this debug block (it has a real, if teleporting, y), but
+        // it dropped isConfident to false above so the counter ignored it — the
+        // reason tag shows WHY ('negative' / 'out-of-frame' / 'teleport').
+        rejected: !pushupFrameValid,
+        rejectReason: pushupRejectReason,
         reps: dbg.reps,
       };
       if (maybeUpdateDebug(nowMs, readout, diagnosticsRef.current.report)) {
@@ -454,6 +538,8 @@ export default function WorkoutSession({
             armed: isArmed,
             phase: dbg.phase,
             postureOk,
+            rejected: !pushupFrameValid,
+            rejectReason: pushupRejectReason,
             reps: dbg.reps,
           },
           nowMs
@@ -506,9 +592,11 @@ export default function WorkoutSession({
         // must get into position again before counting resumes.
         positionGateRef.current.reset();
         statusDebouncerRef.current.reset(); // fresh optimistic warning state
-        // Fresh stable ruler, posture guard and diagnostics for the new step.
+        // Fresh stable ruler, posture guard, outlier validator and diagnostics
+        // for the new step.
         bodyScaleTrackerRef.current.reset();
         postureGuardRef.current.reset();
+        signalValidatorRef.current.reset();
         diagnosticsRef.current.reset();
         lastDebugAtRef.current = -Infinity;
         setDebugReadout(null);

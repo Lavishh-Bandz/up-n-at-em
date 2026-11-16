@@ -75,6 +75,11 @@ export function createPushupDiagnostics() {
   let lastExcursion = null;
   let downFractionReached = false; // did the smoothed excursion ever reach down?
   let repsCounted = 0;
+  // How many frames were REJECTED as outliers (negative / off-frame / teleport)
+  // by the signal validator. Surfacing this in the summary lets the user SEE
+  // the garbage being filtered live, which is the proof the phantom-rep fix is
+  // working.
+  let rejectedCount = 0;
 
   function resetStats() {
     sampleCount = 0;
@@ -83,6 +88,7 @@ export function createPushupDiagnostics() {
     lastExcursion = null;
     downFractionReached = false;
     repsCounted = 0;
+    rejectedCount = 0;
   }
 
   return {
@@ -135,6 +141,9 @@ export function createPushupDiagnostics() {
       if (typeof snapshot.reps === 'number') {
         repsCounted = snapshot.reps;
       }
+      if (snapshot.rejected) {
+        rejectedCount += 1;
+      }
 
       // Store the (rounded, readable) sample, capped to the most recent ones.
       samples.push({
@@ -158,6 +167,10 @@ export function createPushupDiagnostics() {
         armed: !!snapshot.armed,
         phase: snapshot.phase ?? null,
         postureOk: !!snapshot.postureOk,
+        // Outlier-validator result for this frame (so the per-sample list shows
+        // exactly which frames were garbage and why).
+        rejected: !!snapshot.rejected,
+        rejectReason: snapshot.rejectReason ?? null,
         reps: typeof snapshot.reps === 'number' ? snapshot.reps : null,
       });
       if (samples.length > MAX_SAMPLES) {
@@ -220,6 +233,10 @@ export function createPushupDiagnostics() {
           // If this is false after a real set, the downFraction is too deep.
           downFractionReached,
           repsCounted,
+          // How many frames the validator threw out as garbage. A healthy
+          // side-view session with a flaky detector will show some rejects
+          // here while repsCounted stays honest.
+          rejectedCount,
         },
         samples,
       };

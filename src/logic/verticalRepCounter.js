@@ -91,6 +91,19 @@
  *                                         the threshold alongside the counter.
  *                                         The FSM itself trusts the `confident`
  *                                         flag passed to update().
+ * @param {number} [options.minDownFrames=1] How many confident frames the body
+ *                                         must STAY past downFraction before a
+ *                                         completing up-transition is allowed to
+ *                                         count a rep. A real push-up dip spans
+ *                                         several frames, so requiring the dip
+ *                                         to PERSIST stops a single outlier /
+ *                                         glitch frame (which the validator
+ *                                         mostly rejects, this is the belt-and-
+ *                                         braces reinforcement) from completing
+ *                                         a phantom rep. Defaults to 1, which is
+ *                                         the original behavior (one down frame
+ *                                         is enough), so every existing caller/
+ *                                         test is unchanged.
  * @returns {{
  *   update: (currentY:number, bodyScalePx:number, confident:boolean, postureOk?:boolean) => ('up'|'down'),
  *   reset: () => void,
@@ -105,6 +118,7 @@ export function createVerticalRepCounter({
   downFraction,
   upFraction,
   minConfidence = 0.3,
+  minDownFrames = 1,
 } = {}) {
   // Guard against a misconfiguration that would break the hysteresis idea.
   // We must come back UP past a SMALLER excursion than the one that sent us
@@ -116,11 +130,18 @@ export function createVerticalRepCounter({
     );
   }
 
+  // How many confident down-frames we require before an up-transition counts.
+  // At least 1 (never zero, that would mean "never require a down frame").
+  const requiredDownFrames = Math.max(1, Math.floor(minDownFrames));
+
   // Private state. Everyone starts in the 'up' (resting) position with 0 reps
   // and no baseline yet (we learn it from the first confident frame).
   let phase = 'up';
   let reps = 0;
   let baseline = null;
+  // How many confident frames in a row we have stayed in the 'down' phase. Used
+  // with requiredDownFrames to demand a SUSTAINED dip, not a one-frame spike.
+  let downFrameCount = 0;
 
   // DIAGNOSTICS: remember the most recent numbers the FSM actually used, so the
   // on-screen debug readout (and the "click Begin -> leave a report" diagnostics
@@ -204,15 +225,31 @@ export function createVerticalRepCounter({
         // and the upward-only adaptive baseline fully intact.
         if (excursion >= downFraction && postureOk) {
           phase = 'down';
+          // Start counting confident frames spent in the dip. This frame is the
+          // first one, so the dip must last at least requiredDownFrames frames
+          // before the up-transition below is allowed to count a rep.
+          downFrameCount = 1;
         }
       } else {
         // phase === 'down': waiting for the body to come back UP.
-        // Rising back so the excursion shrinks past upFraction completes a rep.
         if (excursion <= upFraction) {
+          // The body has risen past upFraction. Only count the rep if the dip
+          // actually PERSISTED for the required number of confident frames. A
+          // lone outlier frame that jumps 'down' and then immediately back 'up'
+          // on the next frame fails this check, so it cannot fake a rep. (The
+          // validator rejects most such frames before they ever reach here;
+          // this is the belt-and-braces reinforcement the briefing asked for.)
           phase = 'up';
-          reps += 1;
+          if (downFrameCount >= requiredDownFrames) {
+            reps += 1;
+          }
+          downFrameCount = 0;
           // Re-anchor the resting point to where we came back up to.
           baseline = currentY;
+        } else {
+          // Still down (excursion above upFraction): count another confident
+          // frame of a sustained dip.
+          downFrameCount += 1;
         }
       }
 
@@ -224,6 +261,7 @@ export function createVerticalRepCounter({
       phase = 'up';
       reps = 0;
       baseline = null;
+      downFrameCount = 0;
       lastExcursion = null;
       lastPostureOk = true;
     },
