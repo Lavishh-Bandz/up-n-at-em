@@ -29,7 +29,11 @@ import { angleBetween, allConfident, createAngleSmoother } from '../logic/angles
 import {
   measureBodyScale,
   measureUpperBodyY,
+  measureDepthScale,
+  measureUpperBodyDepth,
+  measureCombinedDownSignal,
   createBodyScaleTracker,
+  createSignalReferenceTracker,
   createPostureGuard,
 } from '../logic/upperBodySignal.js';
 import { createPositionGate } from '../logic/positionGate.js';
@@ -137,6 +141,26 @@ export default function WorkoutSession({
   const bodyScaleTrackerRef = useRef(null);
   if (bodyScaleTrackerRef.current === null) {
     bodyScaleTrackerRef.current = createBodyScaleTracker();
+  }
+  // PUSH-UP ONLY: the STABLE DEPTH-scale ruler (meters), the depth-axis twin of
+  // the body-scale ruler above. We feed it the live 3D shoulder width each
+  // confident arming frame, lock() it the instant the step arms, and reuse that
+  // locked value so a front-facing push-up's depth dip is normalized against a
+  // steady real-world length instead of a frame-to-frame one. Reset per step.
+  // (Sit-ups never touch this. Stays null/unlocked when the camera gives no 3D,
+  // and the signal helper then falls back to the pure-y path.)
+  const depthScaleTrackerRef = useRef(null);
+  if (depthScaleTrackerRef.current === null) {
+    depthScaleTrackerRef.current = createBodyScaleTracker();
+  }
+  // PUSH-UP ONLY: the locked "top of the push-up" REST references (the upper
+  // body's resting screen-y and depth-z). Captured the same lock-once way as
+  // the rulers during the 5s arming hold, then subtracted per axis so the
+  // combined signal measures a DIP from the top (see measureCombinedDownSignal).
+  // Reset per step.
+  const signalRefTrackerRef = useRef(null);
+  if (signalRefTrackerRef.current === null) {
+    signalRefTrackerRef.current = createSignalReferenceTracker();
   }
   // PUSH-UP ONLY: the upper-body ANTI-STANDING guard. Its per-frame update()
   // result is passed to the counter as postureOk so a standing / walking bob
@@ -334,12 +358,29 @@ export default function WorkoutSession({
       if (armingScale != null) {
         bodyScaleTrackerRef.current.push(armingScale, true);
       }
+      // Feed the DEPTH ruler too (meters). This is only present when the camera
+      // gives 3D; when it does not, nothing is pushed and the tracker stays
+      // unlocked so the signal helper falls back to pure-y side-on counting.
+      const armingDepthScale = measureDepthScale(keypoints);
+      if (armingDepthScale != null) {
+        depthScaleTrackerRef.current.push(armingDepthScale, true);
+      }
+      // Capture the resting POSITION on each axis (the "top" the user holds)
+      // so the combined signal can measure a dip from it. y is always present
+      // on a confident frame; z only when the camera gives 3D (null otherwise).
+      signalRefTrackerRef.current.push(
+        measureUpperBodyY(keypoints, side),
+        measureUpperBodyDepth(keypoints, side),
+        true
+      );
     }
 
     // Detect the ARM transition (Begin / "GO!"). For push-ups this is where we
     // LOCK the ruler and START the diagnostics report.
     if (step.exercise === 'pushup' && isArmed && !wasArmed) {
       bodyScaleTrackerRef.current.lock();
+      depthScaleTrackerRef.current.lock();
+      signalRefTrackerRef.current.lock();
       const preset = getPreset(step.exercise, step.difficulty);
       diagnosticsRef.current.start(
         {
@@ -351,6 +392,8 @@ export default function WorkoutSession({
           side,
           bodyScalePx: bodyScaleTrackerRef.current.scale,
           bodyScaleLocked: bodyScaleTrackerRef.current.locked,
+          depthScaleM: depthScaleTrackerRef.current.scale,
+          depthScaleLocked: depthScaleTrackerRef.current.locked,
         },
         nowMs
       );
@@ -387,44 +430,94 @@ export default function WorkoutSession({
     //    frame for the warning (still debounced) and early-return WITHOUT
     //    advancing — a null-guarded skip can never nudge the counter.
     if (step.exercise === 'pushup') {
-      // --- PUSH-UP: upper-body vertical movement ---
-      const currentY = measureUpperBodyY(keypoints, side);
-      // Use the LOCKED stable ruler captured during arming. If the lock failed
-      // (e.g. no confident frame during the hold), fall back to the live
+      // --- PUSH-UP: upper-body movement in a COMBINATION of screen-y + depth-z ---
+      // The any-viewpoint upgrade. Instead of watching only the screen-y of the
+      // upper body (which barely moves when the camera is in FRONT of you), we
+      // build ONE combined "down-ness" signal that also rises as the upper body
+      // moves TOWARD the camera (depth z). See measureCombinedDownSignal for the
+      // exact combine rule (a MAX of the two body-relative dips), so a side-on
+      // (y-dominant) and a front-on (z-dominant) push-up both reach threshold.
+
+      // Use the LOCKED stable PIXEL ruler captured during arming. If the lock
+      // failed (e.g. no confident frame during the hold), fall back to the live
       // measurement for this frame so counting is not stranded.
       const liveScale = measureBodyScale(keypoints);
       const bodyScalePx = bodyScaleTrackerRef.current.locked
         ? bodyScaleTrackerRef.current.scale
         : liveScale;
-      if (currentY == null || bodyScalePx == null) {
+      // The LOCKED DEPTH ruler (meters). Falls back to the live 3D shoulder
+      // width if the lock failed, and is null when the camera gives no 3D at
+      // all — in which case the signal helper quietly uses the pure-y path.
+      const liveDepthScale = measureDepthScale(keypoints);
+      const depthScaleM = depthScaleTrackerRef.current.locked
+        ? depthScaleTrackerRef.current.scale
+        : liveDepthScale;
+      // Honor the descriptor's live-tunable depth toggle: when useDepth is
+      // false we pass null as the depth scale so the helper counts on y only.
+      const useDepth = getExercise('pushup').depth?.useDepth !== false;
+
+      if (bodyScalePx == null) {
         updateDisplayConfident(statusDebouncerRef.current.update(false, nowMs));
         return;
       }
+
+      // Build the combined, viewpoint-agnostic "down-ness" signal (already in
+      // body-relative units). We pass the locked REST references so each axis
+      // becomes a dip from the top-of-push-up and the MAX-of-dips combine works.
+      // When the refs never locked (e.g. no confident arming frame) we pass none
+      // and the helper falls back to the raw y position, letting the counter's
+      // own baseline zero it (side-on y-only path). We feed the result to the
+      // vertical counter with a scale of 1, because it is already body-relative;
+      // the counter's adaptive baseline + hysteresis then measure the dip.
+      const refs = signalRefTrackerRef.current.locked
+        ? signalRefTrackerRef.current.refs
+        : null;
+      const combined = measureCombinedDownSignal(
+        keypoints,
+        side,
+        bodyScalePx,
+        useDepth ? depthScaleM : null,
+        refs
+      );
+      if (combined == null) {
+        updateDisplayConfident(statusDebouncerRef.current.update(false, nowMs));
+        return;
+      }
+
       // ANTI-STANDING GUARD: does the posture look like a push-up (not a
-      // standing / walking bob)? This is passed to the counter as postureOk so
-      // a standing dip can never ENTER the 'down' phase. We use the same ruler
-      // the counter uses so the guard and the excursion agree.
+      // standing / walking bob)? It is now viewpoint-robust (uses 3D when
+      // available) and passed to the counter as postureOk so a standing dip can
+      // never ENTER the 'down' phase. We use the same pixel ruler the guard's
+      // 2D fallback expects.
       const postureOk = postureGuardRef.current.update(
         keypoints,
         side,
         bodyScalePx
       );
-      const smoothedY = smootherRef.current.push(currentY);
-      counter.update(smoothedY, bodyScalePx, isConfident, postureOk);
+      // Smooth the combined signal the same way we smoothed the plain y before
+      // (the smoother just averages numbers). The FSM scale is 1 because the
+      // signal is already body-relative.
+      const smoothedSignal = smootherRef.current.push(combined.signal);
+      counter.update(smoothedSignal, 1, isConfident, postureOk);
 
       // --- DEBUG READOUT + DIAGNOSTICS REPORT (throttled) ---
       // Pull the SAME numbers the FSM just used from counter.debug, pair them
-      // with the ruler + posture result, and push them to the on-screen panel
-      // and the report AT MOST a few times a second. The raw (pre-smoothing)
-      // excursion is computed the same way the FSM computes the smoothed one,
-      // using the counter's own baseline, so "raw vs smoothed" is apples to
-      // apples. All of this is gated by maybeUpdateDebug's elapsed-time check,
-      // so it never re-renders the HUD/overlay at frame rate.
+      // with the ruler + posture result + the depth breakdown, and push them to
+      // the on-screen panel and the report AT MOST a few times a second. The raw
+      // (pre-smoothing) excursion is computed the same way the FSM computes the
+      // smoothed one, using the counter's own baseline, so "raw vs smoothed" is
+      // apples to apples. All gated by maybeUpdateDebug's elapsed-time check, so
+      // it never re-renders the HUD/overlay at frame rate.
       const dbg = counter.debug;
       const rawExcursion =
-        dbg.baseline != null && bodyScalePx > 0
-          ? (currentY - dbg.baseline) / bodyScalePx
-          : null;
+        dbg.baseline != null ? combined.signal - dbg.baseline : null;
+      // How much of the dip came from each axis. When the rest references are
+      // locked, combined.posY / combined.posZ are ALREADY body-relative dips
+      // from the top-of-push-up, so we show them straight. This lets the user
+      // SEE, live, whether the depth (front-facing) or vertical (side-on)
+      // component is driving a rep. (zDip is null when there was no depth.)
+      const yDip = combined.posY;
+      const zDip = combined.posZ;
       const readout = {
         excursion: dbg.lastExcursion,
         rawExcursion,
@@ -432,12 +525,19 @@ export default function WorkoutSession({
         upFraction: dbg.upFraction,
         bodyScalePx,
         bodyScaleLocked: bodyScaleTrackerRef.current.locked,
-        upperBodyY: currentY,
+        upperBodyY: measureUpperBodyY(keypoints, side),
         confident: isConfident,
         armed: isArmed,
         phase: dbg.phase,
         postureOk,
         reps: dbg.reps,
+        // DEPTH fields (new): the combined excursion is `excursion` above; these
+        // break it down so the user can tune front-facing live.
+        usedDepth: combined.usedDepth,
+        depthScaleM,
+        depthScaleLocked: depthScaleTrackerRef.current.locked,
+        yDip,
+        zDip,
       };
       if (maybeUpdateDebug(nowMs, readout, diagnosticsRef.current.report)) {
         // Record a report sample on the same throttled beat (plus the UI just
@@ -449,12 +549,17 @@ export default function WorkoutSession({
             upFraction: dbg.upFraction,
             bodyScalePx,
             bodyScaleLocked: bodyScaleTrackerRef.current.locked,
-            upperBodyY: currentY,
+            upperBodyY: measureUpperBodyY(keypoints, side),
             confident: isConfident,
             armed: isArmed,
             phase: dbg.phase,
             postureOk,
             reps: dbg.reps,
+            usedDepth: combined.usedDepth,
+            depthScaleM,
+            depthScaleLocked: depthScaleTrackerRef.current.locked,
+            yDip,
+            zDip,
           },
           nowMs
         );
@@ -508,6 +613,8 @@ export default function WorkoutSession({
         statusDebouncerRef.current.reset(); // fresh optimistic warning state
         // Fresh stable ruler, posture guard and diagnostics for the new step.
         bodyScaleTrackerRef.current.reset();
+        depthScaleTrackerRef.current.reset();
+        signalRefTrackerRef.current.reset();
         postureGuardRef.current.reset();
         diagnosticsRef.current.reset();
         lastDebugAtRef.current = -Infinity;

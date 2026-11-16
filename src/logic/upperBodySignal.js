@@ -144,6 +144,256 @@ export function measureUpperBodyY(keypointsByName, side) {
 }
 
 // -----------------------------------------------------------------------------
+// DEPTH (Z) SIGNAL — the any-viewpoint upgrade
+// -----------------------------------------------------------------------------
+// WHY DEPTH AT ALL (the whole point of this feature):
+//   The vertical (screen-y) signal above works great when the camera sees you
+//   from the SIDE: lowering toward the floor moves the head+shoulders DOWN the
+//   screen (y grows). But when the camera is in FRONT of you, a push-up barely
+//   moves the shoulders up/down on screen — instead the upper body moves TOWARD
+//   and then AWAY from the camera. That is a change in DEPTH, not in screen-y.
+//   BlazePose gives us an estimated depth `z` (meters) per joint, so we can see
+//   that toward/away motion and count a front-facing push-up too.
+//
+// THE Z SIGN (verified for this engine; see keypointAdapter.js):
+//   keypoints3D are WORLD landmarks in METERS, roughly hip-centered. z is the
+//   depth axis and gets SMALLER / more NEGATIVE as a joint moves CLOSER to the
+//   camera, larger/positive as it moves AWAY. So lowering into a front-facing
+//   push-up makes the upper-body z DECREASE at the bottom and INCREASE back up
+//   — the MIRROR of how screen-y INCREASES at the bottom. We account for that
+//   sign below when we turn z into a "down-and-toward-the-camera" number.
+//
+// UNITS DON'T MATCH, SO WE NORMALIZE BOTH:
+//   screen-y is in PIXELS, depth-z is in METERS, so we cannot just add them. We
+//   convert each to BODY-RELATIVE units first: y is divided by the locked PIXEL
+//   body-scale (shoulder width in pixels, exactly as the y path already does),
+//   and z is divided by a stable DEPTH scale in meters (the 3D shoulder width,
+//   measured the same lock-once way). After that both are dimensionless "how
+//   many body-widths" numbers that can be compared and combined.
+
+/**
+ * Tiny helper: the straight-line distance between two 3D points using their
+ * meter coordinates (x3d/y3d/z3d, attached by the keypoint adapter), or null if
+ * either point lacks 3D data. Pure meters in, meters out.
+ *
+ * @param {{x3d?:number,y3d?:number,z3d?:number}} [p1]
+ * @param {{x3d?:number,y3d?:number,z3d?:number}} [p2]
+ * @returns {number|null}
+ */
+function distance3D(p1, p2) {
+  if (
+    !p1 ||
+    !p2 ||
+    typeof p1.x3d !== 'number' ||
+    typeof p2.x3d !== 'number' ||
+    typeof p1.y3d !== 'number' ||
+    typeof p2.y3d !== 'number' ||
+    typeof p1.z3d !== 'number' ||
+    typeof p2.z3d !== 'number'
+  ) {
+    return null;
+  }
+  const dx = p2.x3d - p1.x3d;
+  const dy = p2.y3d - p1.y3d;
+  const dz = p2.z3d - p1.z3d;
+  return Math.sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+/**
+ * Measure a positive DEPTH-SCALE reference in METERS from the 3D upper body.
+ *
+ * This is the depth-axis twin of measureBodyScale: a stable "ruler" in meters
+ * we divide the depth movement by, so the depth dip is body-relative (how many
+ * shoulder-widths toward the camera) rather than raw meters, and distance from
+ * the camera does not change the threshold. We use the 3D SHOULDER WIDTH (the
+ * meter distance between the two shoulders' world landmarks) when both are
+ * present. It is a real-world length that barely changes through a push-up, so
+ * it makes a steady ruler.
+ *
+ * Returns null when the 3D shoulder points are missing or degenerate, so the
+ * caller can skip the depth part of the signal for that frame (graceful 2D
+ * fallback — the y path still works).
+ *
+ * @param {object} keypointsByName  Keypoints keyed by name (carrying 3D fields).
+ * @returns {number|null} a positive depth-scale in meters, or null.
+ */
+export function measureDepthScale(keypointsByName) {
+  if (!keypointsByName) {
+    return null;
+  }
+  const leftShoulder = keypointsByName.left_shoulder;
+  const rightShoulder = keypointsByName.right_shoulder;
+  if (leftShoulder && rightShoulder) {
+    const width3D = distance3D(leftShoulder, rightShoulder);
+    if (width3D !== null && width3D > 0) {
+      return width3D;
+    }
+  }
+  return null;
+}
+
+/**
+ * Measure the representative UPPER-BODY DEPTH (a z meter value) for the chosen
+ * side, mirroring measureUpperBodyY but on the depth axis.
+ *
+ * Just like the y signal averages the chosen shoulder with the nose when the
+ * nose is present, we average the shoulder's z with the nose's z so the depth
+ * signal follows the whole head+shoulders block moving toward/away from the
+ * camera. We read the `z` field the keypoint adapter attached (meters). If the
+ * chosen shoulder has no z (no 3D this frame), we return null so the caller
+ * falls back to the y-only signal.
+ *
+ * REMEMBER THE SIGN: smaller/more-negative z = closer to the camera. We return
+ * the raw z here (no flip); the combine step below is where we turn a DECREASE
+ * in z into a positive "down-and-toward-camera" dip.
+ *
+ * @param {object} keypointsByName  Keypoints keyed by name (carrying z).
+ * @param {'left'|'right'} side     Which side's shoulder to read.
+ * @returns {number|null} a z meter value, or null if depth is unavailable.
+ */
+export function measureUpperBodyDepth(keypointsByName, side) {
+  if (!keypointsByName) {
+    return null;
+  }
+  const shoulder =
+    side === 'right'
+      ? keypointsByName.right_shoulder
+      : keypointsByName.left_shoulder;
+  if (!shoulder || typeof shoulder.z !== 'number') {
+    return null;
+  }
+  const nose = keypointsByName.nose;
+  if (nose && typeof nose.z === 'number') {
+    return (shoulder.z + nose.z) / 2;
+  }
+  return shoulder.z;
+}
+
+/**
+ * Build ONE combined, viewpoint-agnostic "down-ness" POSITION for the upper
+ * body, so the SAME rep counter (createVerticalRepCounter) can count a push-up
+ * whether the camera is to the SIDE (motion in screen-y) or in FRONT (motion in
+ * depth-z). This is the heart of the any-viewpoint upgrade.
+ *
+ * WHAT WE RETURN (read this, it explains how it feeds the FSM):
+ *   A single number that grows LARGER the more the upper body is "down-and-away
+ *   from rest" — down the screen AND/OR toward the camera — expressed in
+ *   BODY-RELATIVE units (body-widths), NOT pixels or meters. We hand this to
+ *   the vertical rep counter as its position signal with a scale of 1, because
+ *   it is already body-relative. The counter then does its own adaptive
+ *   baselining + hysteresis on it exactly as before, so a dip from rest in this
+ *   combined number is the "excursion" it compares to downFraction/upFraction.
+ *
+ * THE COMBINE RULE (documented plainly):
+ *   We compute two body-relative "down-ness" DIPS from the locked top-of-push-up
+ *   rest and take their MAX:
+ *     yDip = (screenY - restY) / bodyScalePx    (grows as the body goes DOWN)
+ *     zDip = -(z - restZ) / depthScaleM         (grows as the body nears camera,
+ *                                                because z DECREASES toward it)
+ *     combined = max(yDip, zDip)
+ *   MAX (not a sum) is deliberate: a pure SIDE push-up moves mostly in y, so
+ *   yDip dominates and the combined number tracks yDip; a pure FRONT push-up
+ *   moves mostly in z, so zDip dominates and it tracks zDip. Either viewpoint
+ *   reaches the threshold on its own, and we never need to know which way the
+ *   camera is pointing. When the two are comparable (an in-between angle)
+ *   whichever axis shows the bigger dip wins, which is exactly what we want: we
+ *   count on the clearest evidence of a rep. The counter then applies its own
+ *   adaptive baseline + hysteresis on top of this combined dip, so a slightly
+ *   imperfect locked rest is self-correcting.
+ *
+ * GRACEFUL FALLBACK: if depth is unavailable this frame (no z / no depth
+ * scale), we fall back to the y-only position (posY) so the side-on path keeps
+ * working unchanged. If even the y position is unavailable we return null so
+ * the caller skips the frame.
+ *
+ * WHY WE NEED A "REST" REFERENCE PER AXIS (important):
+ *   The two axes live at totally different offsets. The shoulder's screen-y
+ *   divided by the pixel scale sits around ~1.0 (the shoulder is about a
+ *   shoulder-width or so down from the top of the frame), while the depth
+ *   position sits around ~0. If we took the MAX of those RAW positions, the big
+ *   y offset would always win and the depth motion could never show through. So
+ *   we first subtract a REST reference on EACH axis (the "top of the push-up"
+ *   captured once during the 5s arming hold) to turn each position into a DIP
+ *   from rest, and THEN take the max. Now a pure side dip (y moves, z still) and
+ *   a pure front dip (z moves, y still) each produce the right positive dip and
+ *   the other axis contributes ~0. The caller still feeds the result through the
+ *   rep counter, which applies its own adaptive baseline + hysteresis on top, so
+ *   a slightly-off locked rest is self-correcting.
+ *
+ *   If a rest reference is not supplied for an axis we fall back to using that
+ *   axis's RAW position (useful for the side-on, y-only path where the counter's
+ *   own baseline does the zeroing). Mixing a raw-y with a dip-z is avoided: the
+ *   depth component is only combined in when BOTH a depth rest AND a depth scale
+ *   are available, so we never compare a dip against a raw offset.
+ *
+ * @param {object} keypointsByName  Keypoints keyed by name (2D + optional z).
+ * @param {'left'|'right'} side     Which side pickBetterSide chose.
+ * @param {number} bodyScalePx      The locked PIXEL body-scale ruler (y axis).
+ * @param {number|null} [depthScaleM]  The locked METER depth-scale ruler (z axis).
+ *                                   Pass null/undefined to skip the depth part.
+ * @param {object} [refs]           Locked "top of the push-up" rest references,
+ *                                   captured once during arming:
+ *                                   { restY:number, restZ:number }. Omit to let
+ *                                   the counter's own baseline do the zeroing
+ *                                   (y-only fallback).
+ * @returns {{
+ *   signal: number,
+ *   posY: number,
+ *   posZ: (number|null),
+ *   usedDepth: boolean
+ * }|null} the combined signal plus its parts (for the debug readout), or null.
+ */
+export function measureCombinedDownSignal(
+  keypointsByName,
+  side,
+  bodyScalePx,
+  depthScaleM = null,
+  refs = null
+) {
+  // Without a usable pixel ruler we cannot build the y component, which is our
+  // always-available base — so there is nothing to report this frame.
+  if (typeof bodyScalePx !== 'number' || bodyScalePx <= 0) {
+    return null;
+  }
+
+  const currentY = measureUpperBodyY(keypointsByName, side);
+  if (currentY == null) {
+    return null;
+  }
+
+  const hasRestY = refs && typeof refs.restY === 'number';
+  const hasRestZ = refs && typeof refs.restZ === 'number';
+
+  // Y component: body-relative "down the screen". When we have a locked rest
+  // reference we express it as a DIP from that top (so rest ~= 0 and it lines up
+  // with the depth dip); otherwise we pass the raw body-relative position and
+  // let the counter's own baseline zero it (the y-only fallback path).
+  const posY = hasRestY
+    ? (currentY - refs.restY) / bodyScalePx
+    : currentY / bodyScalePx;
+
+  // Z component: body-relative "toward the camera" DIP. Only combined in when we
+  // have a depth reading, a stable depth ruler AND a locked depth rest (so we
+  // never mix a dip against a raw-y offset). We NEGATE the z change so moving
+  // CLOSER to the camera (z gets smaller/more negative than the resting top)
+  // makes zDip POSITIVE, matching posY's "bigger = more down" direction.
+  let posZ = null;
+  let usedDepth = false;
+  if (typeof depthScaleM === 'number' && depthScaleM > 0 && hasRestZ) {
+    const currentZ = measureUpperBodyDepth(keypointsByName, side);
+    if (currentZ != null) {
+      posZ = -(currentZ - refs.restZ) / depthScaleM;
+      usedDepth = true;
+    }
+  }
+
+  // Combine: MAX of the two body-relative down-ness dips (see rule above).
+  const signal = posZ === null ? posY : Math.max(posY, posZ);
+
+  return { signal, posY, posZ, usedDepth };
+}
+
+// -----------------------------------------------------------------------------
 // ANTI-STANDING GUARD (upper-body only)
 // -----------------------------------------------------------------------------
 // WHY THIS EXISTS (the live bug):
@@ -173,19 +423,31 @@ export function measureUpperBodyY(keypointsByName, side) {
 //     requirement did.
 //
 //   CUE B — TORSO IS NOT UPRIGHT (works head-on AND side-on, no hip needed):
-//     When you stand tall your head sits FAR above your shoulders relative to
-//     your body-scale; the nose-to-shoulder vertical gap is large. When you are
+//     When you stand tall your head sits FAR above your shoulders; when you are
 //     down in a push-up / plank your head and shoulders are much closer to the
-//     same height (the head drops forward, the whole block is near-level), so
-//     that vertical gap is a SMALL fraction of body-scale. We REJECT the frame
-//     as "standing upright" when the nose sits more than `uprightNoseFraction`
-//     of a body-scale ABOVE the shoulder (nose y smaller than shoulder y by a
-//     big margin). This uses only the nose + a shoulder, so it works whether
-//     the camera sees you head-on or side-on.
-//     HONEST TRADE-OFF: this is a coarse upright test, not a precise plank
-//     detector; a very deep forward head tilt could fool it. It is tuned to
-//     clearly separate "standing tall" from "down on the floor", which is the
-//     specific failure (walking/standing) we must stop.
+//     same height (the whole block is near-level). So a large head-above-
+//     shoulder VERTICAL gap means "standing", a small one means "down".
+//
+//     VIEWPOINT PROBLEM WITH THE OLD 2D-ONLY VERSION (the bug this feature
+//     fixes): the old check measured that gap in SCREEN-Y pixels only. From the
+//     FRONT, a legitimate head-up plank (you lift your head to face the camera)
+//     makes the nose sit high on screen even though, in the real world, the
+//     head is barely above the shoulders. The 2D gap looked just like standing,
+//     so a genuine front-facing plank got falsely REJECTED.
+//
+//     THE 3D FIX: when depth is available we measure the gap along the REAL
+//     WORLD vertical axis (y3d, meters) instead, as a fraction of the 3D
+//     shoulder-width depth-scale. In the real world a standing head is a big
+//     fraction of a shoulder-width above the shoulders; a plank head is a small
+//     one — and this is TRUE regardless of where the camera sits, because world
+//     landmarks are not distorted by the camera angle the way screen pixels
+//     are. So we REJECT "standing upright" using the 3D gap when we have it, and
+//     only fall back to the 2D screen-y gap when 3D is missing (so the guard
+//     still does something useful on a pure-2D frame). Either way it still uses
+//     only the nose + a shoulder — no hip required.
+//     HONEST TRADE-OFF: this is still a coarse upright test, not a precise plank
+//     detector. It is tuned to clearly separate "standing tall" from "down on
+//     the floor", which is the specific failure (walking/standing) we must stop.
 //
 // HOW THE CUES COMBINE (the returned boolean = "posture looks like a push-up"):
 //   - If CUE B says the torso is clearly UPRIGHT -> posture is NOT ok (reject).
@@ -217,11 +479,22 @@ export const DEFAULT_POSTURE_CONFIG = {
   // be planted (and to let a dangling wrist veto). Matches the app's
   // MIN_CONFIDENCE gate.
   wristMinConfidence: 0.3,
-  // CUE B: if the nose sits MORE than this fraction of a body-scale ABOVE the
-  // shoulder, the torso reads as standing upright -> reject. Tuned to separate
-  // "standing tall" (large head-above-shoulder gap) from "down in a plank"
-  // (small gap). Meant to be tuned live.
+  // CUE B (2D fallback): if the nose sits MORE than this fraction of a
+  // body-scale ABOVE the shoulder IN SCREEN PIXELS, the torso reads as standing
+  // upright -> reject. Only used when 3D depth is NOT available this frame (see
+  // uprightNose3DFraction for the viewpoint-robust 3D version). Meant to be
+  // tuned live.
   uprightNoseFraction: 0.6,
+  // CUE B (3D, viewpoint-robust): the SAME idea measured along the real-world
+  // vertical axis (y3d, meters) as a fraction of the 3D shoulder-width
+  // depth-scale. If the nose sits MORE than this fraction of a 3D shoulder-width
+  // ABOVE the shoulders in the real world, the torso reads as standing -> reject.
+  // Because world landmarks are not warped by the camera angle, this no longer
+  // falsely rejects a FRONT-FACING head-up plank (where the head only LOOKS high
+  // on screen). A touch more generous than the 2D value because real-world head
+  // lift in a plank is still a modest fraction of a shoulder-width. Live-tunable
+  // starting value.
+  uprightNose3DFraction: 0.9,
 };
 
 /**
@@ -268,14 +541,36 @@ export function isPushupPosture(
 
   // CUE B: reject a clearly UPRIGHT torso (nose far above the shoulder line).
   const nose = keypointsByName.nose;
-  if (nose && typeof nose.y === 'number') {
-    // How far the nose sits ABOVE the shoulder, as a fraction of body-scale.
-    // y grows downward, so "above" means a SMALLER y -> (shoulder.y - nose.y)
-    // is positive when the head is up high (standing tall).
-    const noseAboveFraction = (shoulder.y - nose.y) / bodyScalePx;
-    if (noseAboveFraction > cfg.uprightNoseFraction) {
-      // Head is stacked high above the shoulders: this is a standing posture.
-      return false;
+  if (nose) {
+    // PREFER the 3D, viewpoint-robust test when both the nose and the chosen
+    // shoulder carry real-world coordinates. We measure the head-above-shoulder
+    // gap along the WORLD vertical axis (y3d, meters; y grows DOWNWARD like the
+    // image) as a fraction of the 3D shoulder-width depth-scale. "Above" means a
+    // SMALLER y3d, so (shoulder.y3d - nose.y3d) is positive when the head is up
+    // high in the real world — i.e. standing tall — no matter where the camera
+    // sits. This is what stops a front-facing head-up plank being mistaken for
+    // standing.
+    const depthScaleM = measureDepthScale(keypointsByName);
+    if (
+      typeof nose.y3d === 'number' &&
+      typeof shoulder.y3d === 'number' &&
+      depthScaleM !== null &&
+      depthScaleM > 0
+    ) {
+      const noseAbove3DFraction = (shoulder.y3d - nose.y3d) / depthScaleM;
+      if (noseAbove3DFraction > cfg.uprightNose3DFraction) {
+        // Head is stacked high above the shoulders in the real world: standing.
+        return false;
+      }
+    } else if (typeof nose.y === 'number') {
+      // FALLBACK (no 3D this frame): measure the gap in SCREEN pixels. y grows
+      // downward, so "above" means a SMALLER y -> (shoulder.y - nose.y) is
+      // positive when the head is up high. Coarser and camera-angle dependent,
+      // but better than nothing on a pure-2D frame.
+      const noseAboveFraction = (shoulder.y - nose.y) / bodyScalePx;
+      if (noseAboveFraction > cfg.uprightNoseFraction) {
+        return false;
+      }
     }
   }
 
@@ -467,6 +762,104 @@ export function createPostureGuard(config = {}) {
  *   get locked: () => boolean
  * }}
  */
+/**
+ * Create a pure "top of the push-up" REST-REFERENCE tracker.
+ *
+ * This is the rest-position twin of createBodyScaleTracker. While the body-scale
+ * tracker locks the RULERS (shoulder width in pixels / meters), THIS one locks
+ * the resting POSITION on each axis — the upper-body screen-y and depth-z the
+ * user holds at the TOP of a push-up during the 5s arming hold. measureCombined
+ * DownSignal subtracts these so each axis becomes a DIP from the top (rest ~= 0)
+ * and the MAX-of-dips combine rule works (see that function's header for why a
+ * per-axis rest is needed).
+ *
+ * Unlike the body-scale tracker, the values here are POSITIONS, not lengths:
+ * restY is a pixel y (positive) and restZ is a depth in meters that can be
+ * NEGATIVE or zero (it is hip-centered). So this tracker accepts ANY finite
+ * number, not just positive ones. Each axis is tracked independently: a frame
+ * may contribute a y but no z (no 3D), and that is fine.
+ *
+ * Lifecycle mirrors the body-scale tracker: push() confident arming frames,
+ * lock() once when the step arms, then read the frozen refs for the rest of the
+ * set, and reset() per step.
+ *
+ * @param {object} [options]
+ * @param {number} [options.windowSize=15]  How many recent readings to average
+ *                                           per axis while arming.
+ * @returns {{
+ *   push: (y:(number|null), z:(number|null), confident?:boolean) => void,
+ *   lock: () => ({restY:number|null, restZ:number|null}),
+ *   reset: () => void,
+ *   get refs: () => ({restY:number|null, restZ:number|null}),
+ *   get locked: () => boolean
+ * }}
+ */
+export function createSignalReferenceTracker({ windowSize = 15 } = {}) {
+  const size = Math.max(1, Math.floor(windowSize));
+  let yReadings = [];
+  let zReadings = [];
+  let locked = false;
+  let lockedY = null;
+  let lockedZ = null;
+
+  function avg(list) {
+    if (list.length === 0) return null;
+    return list.reduce((sum, n) => sum + n, 0) / list.length;
+  }
+
+  return {
+    /**
+     * Offer one per-frame rest candidate while arming. y and/or z may be null
+     * for a frame (e.g. no 3D depth yet); each axis is accumulated on its own.
+     * Ignored once locked and on unconfident frames.
+     */
+    push(y, z, confident = true) {
+      if (locked || !confident) {
+        return;
+      }
+      if (typeof y === 'number' && Number.isFinite(y)) {
+        yReadings.push(y);
+        if (yReadings.length > size) yReadings.shift();
+      }
+      if (typeof z === 'number' && Number.isFinite(z)) {
+        zReadings.push(z);
+        if (zReadings.length > size) zReadings.shift();
+      }
+    },
+
+    /** Freeze the current smoothed rest references. */
+    lock() {
+      lockedY = avg(yReadings);
+      lockedZ = avg(zReadings);
+      locked = true;
+      return { restY: lockedY, restZ: lockedZ };
+    },
+
+    /** Forget everything for the next step. */
+    reset() {
+      yReadings = [];
+      zReadings = [];
+      locked = false;
+      lockedY = null;
+      lockedZ = null;
+    },
+
+    /**
+     * The references to USE right now: the locked values once locked, otherwise
+     * the current smoothed candidates (so a caller can peek before locking).
+     */
+    get refs() {
+      return locked
+        ? { restY: lockedY, restZ: lockedZ }
+        : { restY: avg(yReadings), restZ: avg(zReadings) };
+    },
+
+    get locked() {
+      return locked;
+    },
+  };
+}
+
 export function createBodyScaleTracker({ windowSize = 15 } = {}) {
   const size = Math.max(1, Math.floor(windowSize));
   let readings = [];

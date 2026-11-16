@@ -106,6 +106,20 @@ export const EXERCISES = {
       ...DEFAULT_POSTURE_CONFIG,
       wristStationaryFraction: 0.2,
     },
+    // DEPTH (any-viewpoint) CONFIG (pure data, easy to find + tune live).
+    // Push-ups are now counted from a COMBINED signal: the upper body moving
+    // DOWN the screen (y) and/or TOWARD the camera (depth z). Side-on reps move
+    // mostly in y; front-on reps move mostly in z. See measureCombinedDownSignal
+    // in upperBodySignal.js for the exact combine rule (a MAX of the two
+    // body-relative dips). The y axis is normalized by the locked PIXEL body
+    // scale (shoulder width in pixels) and the z axis by a locked METER depth
+    // scale (3D shoulder width), both captured once during the 5s arming hold.
+    // `useDepth` lets you turn the depth component off to fall back to the old
+    // pure-y behavior if a particular camera's depth estimate is noisy. Starting
+    // value meant to be nudged live via the debug readout.
+    depth: {
+      useDepth: true,
+    },
     sides: {
       // Push-ups need only the chosen side's SHOULDER: it is both the vertical
       // signal and the anchor for the body-scale ruler. We deliberately do NOT

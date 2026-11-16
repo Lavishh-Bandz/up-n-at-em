@@ -53,6 +53,12 @@ export default function DebugReadout({ debug, report }) {
     phase,
     postureOk,
     reps,
+    // DEPTH (any-viewpoint) fields.
+    usedDepth, // did this frame have a usable depth reading?
+    depthScaleM, // the meter depth ruler (locked once armed)
+    depthScaleLocked,
+    yDip, // body-relative dip from screen-y (side-on component)
+    zDip, // body-relative dip from depth-z (front-on component)
   } = debug;
 
   return (
@@ -60,11 +66,19 @@ export default function DebugReadout({ debug, report }) {
       <div className="debug-readout-title">Detector debug</div>
 
       <div className="debug-line">
-        dip (smoothed): <strong>{fmt(excursion)}</strong> / need{' '}
+        dip combined (smoothed): <strong>{fmt(excursion)}</strong> / need{' '}
         {fmt(downFraction, 2)}
       </div>
-      <div className="debug-line">raw dip: {fmt(rawExcursion)}</div>
+      <div className="debug-line">raw combined dip: {fmt(rawExcursion)}</div>
       <div className="debug-line">up threshold: {fmt(upFraction, 2)}</div>
+      <div className="debug-line">
+        vertical dip (y): {fmt(yDip)} · depth dip (z): {fmt(zDip)}
+      </div>
+      <div className="debug-line">
+        depthScale: {usedDepth ? fmt(depthScaleM) + 'm' : 'n/a'}{' '}
+        {depthScaleLocked ? '(locked)' : '(live)'} · depth:{' '}
+        {usedDepth ? 'on' : 'off (y-only)'}
+      </div>
       <div className="debug-line">
         bodyScale: {fmtPx(bodyScalePx)}{' '}
         {bodyScaleLocked ? '(locked)' : '(live)'}

@@ -75,6 +75,13 @@ export function createPushupDiagnostics() {
   let lastExcursion = null;
   let downFractionReached = false; // did the smoothed excursion ever reach down?
   let repsCounted = 0;
+  // DEPTH (any-viewpoint) summary. The combined `excursion` above already folds
+  // in depth, but we also track the per-axis dips so a copied report shows
+  // WHICH axis drove the set: a big maxZDip with a small maxYDip means the user
+  // was front-facing (depth did the work); the reverse means side-on.
+  let maxYDip = null; // biggest body-relative DOWN-the-screen dip seen
+  let maxZDip = null; // biggest body-relative TOWARD-the-camera dip seen
+  let sawDepth = false; // did any sample actually have a usable depth reading?
 
   function resetStats() {
     sampleCount = 0;
@@ -83,6 +90,9 @@ export function createPushupDiagnostics() {
     lastExcursion = null;
     downFractionReached = false;
     repsCounted = 0;
+    maxYDip = null;
+    maxZDip = null;
+    sawDepth = false;
   }
 
   return {
@@ -136,6 +146,22 @@ export function createPushupDiagnostics() {
         repsCounted = snapshot.reps;
       }
 
+      // Track the per-axis dips so the summary can show which viewpoint drove
+      // the set (see maxYDip/maxZDip above).
+      if (typeof snapshot.yDip === 'number') {
+        if (maxYDip === null || snapshot.yDip > maxYDip) {
+          maxYDip = snapshot.yDip;
+        }
+      }
+      if (typeof snapshot.zDip === 'number') {
+        if (maxZDip === null || snapshot.zDip > maxZDip) {
+          maxZDip = snapshot.zDip;
+        }
+      }
+      if (snapshot.usedDepth) {
+        sawDepth = true;
+      }
+
       // Store the (rounded, readable) sample, capped to the most recent ones.
       samples.push({
         tMs:
@@ -159,6 +185,17 @@ export function createPushupDiagnostics() {
         phase: snapshot.phase ?? null,
         postureOk: !!snapshot.postureOk,
         reps: typeof snapshot.reps === 'number' ? snapshot.reps : null,
+        // DEPTH (any-viewpoint) per-sample fields. usedDepth tells us whether
+        // this frame actually had a depth reading to work with; yDip/zDip are
+        // the body-relative dips from each axis; depthScaleM is the meter ruler.
+        usedDepth: !!snapshot.usedDepth,
+        yDip: round(snapshot.yDip),
+        zDip: round(snapshot.zDip),
+        depthScaleM:
+          typeof snapshot.depthScaleM === 'number'
+            ? round(snapshot.depthScaleM, 3)
+            : null,
+        depthScaleLocked: !!snapshot.depthScaleLocked,
       });
       if (samples.length > MAX_SAMPLES) {
         samples.shift();
@@ -220,6 +257,12 @@ export function createPushupDiagnostics() {
           // If this is false after a real set, the downFraction is too deep.
           downFractionReached,
           repsCounted,
+          // DEPTH summary (any-viewpoint). sawDepth=false means the camera
+          // never gave usable 3D, so the set was counted on screen-y alone.
+          // Comparing maxYDip vs maxZDip tells us which viewpoint drove it.
+          sawDepth,
+          maxYDip: round(maxYDip),
+          maxZDip: round(maxZDip),
         },
         samples,
       };
