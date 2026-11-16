@@ -129,8 +129,13 @@ function dayToUtcMs(day) {
  *     version: 1,
  *     settings: { [exerciseId]: { difficulty, currentTarget, startingTarget, autoIncrease } },
  *     streak: 0,
- *     lastCompletedDate: null,   // last day a workout was actually finished
- *     lastResolvedDate: null,    // last day the miss/decay logic ran (idempotency)
+ *     lastCompletedDate: null,   // last day a workout was actually FINISHED (drives history/tracker)
+ *     lastActiveDate: null,      // last day the user COMPLETED or deliberately SKIPPED a workout.
+ *                                //   THIS is the baseline the miss/decay gap is measured from, so
+ *                                //   consistency reflects WORKOUTS DONE, not merely the app being opened.
+ *     lastResolvedDate: null,    // last day the miss/decay logic ran. ONLY an idempotency guard
+ *                                //   ("have we already reconciled today?"); it is NOT the gap baseline,
+ *                                //   so simply opening the app does not advance where the gap is measured from.
  *     history: [],               // completed-day log for the consistency tracker
  *   }
  *
@@ -160,6 +165,7 @@ export function createInitialState({ exercise, difficulty, startingTarget }) {
     },
     streak: 0,
     lastCompletedDate: null,
+    lastActiveDate: null,
     lastResolvedDate: null,
     history: [],
   };
@@ -271,15 +277,27 @@ export function setStartingTarget(state, exerciseId, n) {
 // ---------------------------------------------------------------------------
 
 /**
- * Work out which day we last "saw" the user, for the miss/decay maths.
- * Prefer lastResolvedDate (the last day we actually ran the reconciliation),
- * falling back to lastCompletedDate (the last finished workout) if we have never
- * resolved before. Returns null if the user is brand new (nothing to compare to).
+ * Work out the day the miss/decay gap is measured FROM: the last day the user
+ * was actually ACTIVE, meaning they either COMPLETED a workout or deliberately
+ * SKIPPED one. This is the key to making the tracker reward WORKOUTS DONE rather
+ * than merely opening the app.
+ *
+ * WHY NOT lastResolvedDate? Because resolveDay stamps lastResolvedDate on every
+ * app open, using it as the baseline would mean a user who opens the app every
+ * day but never works out keeps their streak and grown target forever: the
+ * decay would never fire. That is the loophole we are closing. lastResolvedDate
+ * is now used ONLY as an idempotency guard (see resolveDay), never as the gap
+ * baseline.
+ *
+ * We prefer lastActiveDate (completed OR skipped). For older saved states that
+ * predate lastActiveDate we fall back to lastCompletedDate so existing users
+ * reconcile sensibly. Returns null if the user has never been active (nothing
+ * to compare to yet, a brand-new user).
  * @param {object} state
  * @returns {string|null}
  */
-function lastSeenDay(state) {
-  return state.lastResolvedDate || state.lastCompletedDate || null;
+function lastActiveDay(state) {
+  return state.lastActiveDate || state.lastCompletedDate || null;
 }
 
 /**
@@ -287,41 +305,64 @@ function lastSeenDay(state) {
  * action) so the streak and targets reflect how many days have slipped by.
  *
  * THE RULES (exactly as the user specified):
- *   - missedDays is the whole-day gap from the last day we saw the user to
- *     `today`.
- *   - Miss EXACTLY ONE day (missedDays <= 1): do nothing. The target HOLDS and
- *     the streak CONTINUES. (A gap of 0 means we already resolved today; a gap
- *     of 1 means "yesterday was the last day", i.e. you only missed today so
- *     far — still within the one-day grace.)
- *   - Miss TWO OR MORE days (missedDays >= 2): the streak RESETS to 0, AND every
- *     exercise's currentTarget DECAYS by 1 FLAT per missed day (not scaled to
- *     difficulty), floored at that exercise's startingTarget so it never drops
- *     below the user's baseline.
+ *   - A day is "missed" when the user did NOT do (or deliberately skip) the
+ *     workout that day. We measure from lastActiveDay, the last day they
+ *     completed or deliberately skipped, NOT from the last app open.
+ *   - Miss EXACTLY ONE day: do nothing. The target HOLDS and the streak
+ *     CONTINUES. One slipped day costs nothing.
+ *   - Miss TWO OR MORE days: the streak RESETS to 0, AND every exercise's
+ *     currentTarget DECAYS by 1 FLAT per missed day (not scaled to difficulty),
+ *     floored at that exercise's startingTarget so it never drops below the
+ *     user's baseline.
  *
- * IDEMPOTENT: we stamp lastResolvedDate = today at the end, and a second call
- * with the same `today` sees missedDays === 0 and changes nothing. So re-opening
- * the app repeatedly on the same day never double-decays.
+ * GAP vs DAYS ACTUALLY MISSED (the important off-by-one):
+ *   daysBetween(lastActive, today) is the CALENDAR gap, which is one MORE than
+ *   the number of days actually missed. If you worked out Monday and it is now
+ *   Tuesday, the gap is 1 but you have missed ZERO full days so far. If it is
+ *   Wednesday, the gap is 2 but only ONE day (Tuesday) was actually missed,
+ *   which is the "miss one day, hold + continue" grace case. So:
+ *       missedDays = daysBetween(lastActive, today) - 1
+ *   A gap of 1 gives 0 missed (hold). A gap of 2 gives 1 missed (hold). A gap of
+ *   3 gives 2 missed (reset + decay by 2). We decay by missedDays, so an
+ *   N-missed-day absence decays by exactly N.
  *
- * If the user is brand new (no last-seen day), there is nothing to reconcile —
- * we just stamp today so future gaps are measured from here.
+ * IDEMPOTENT: lastResolvedDate is the guard. If we have ALREADY resolved today
+ * (lastResolvedDate === today) we change nothing, so re-opening the app
+ * repeatedly on the same day never double-applies or drifts. Crucially we do
+ * NOT measure the gap from lastResolvedDate, only from lastActiveDay, so the
+ * mere act of resolving (opening the app) never advances the baseline. A user
+ * who opens the app several days running WITHOUT working out keeps accumulating
+ * missed days against their last ACTIVE day and will hit the 2+-day reset+decay.
+ *
+ * If the user is brand new (never active), there is nothing to reconcile, so we
+ * just stamp today's resolve guard.
  *
  * @param {object} state
  * @param {string} today  Injected 'YYYY-MM-DD'.
  * @returns {object} new state.
  */
 export function resolveDay(state, today) {
-  const seen = lastSeenDay(state);
+  // Idempotency guard: if we already reconciled today, do nothing at all. This
+  // is the ONLY role lastResolvedDate plays; it never feeds the gap maths.
+  if (state.lastResolvedDate === today) {
+    return state;
+  }
 
-  // Brand-new user: nothing to reconcile, just record that we have now seen a
-  // day so the next gap is measured from here.
-  if (!seen) {
+  const active = lastActiveDay(state);
+
+  // Brand-new user (never completed or skipped): nothing to reconcile, just
+  // stamp today's resolve guard so repeat opens today stay a no-op.
+  if (!active) {
     return { ...state, lastResolvedDate: today };
   }
 
-  const missedDays = daysBetween(seen, today);
+  // Days ACTUALLY missed = calendar gap minus 1 (see the off-by-one note above).
+  // A negative gap (clock skew / travelling back a timezone) also lands here and
+  // safely holds.
+  const missedDays = daysBetween(active, today) - 1;
 
-  // Miss one day or fewer (including 0 = already resolved today, and any
-  // negative weirdness from a clock skew): HOLD everything, just stamp today.
+  // Miss one day or fewer: HOLD everything (target + streak), just stamp the
+  // resolve guard.
   if (missedDays <= 1) {
     return { ...state, lastResolvedDate: today };
   }
@@ -354,12 +395,13 @@ export function resolveDay(state, today) {
  *     difficulty's daily increment (easy +1, standard +2, hard +3, extreme +5),
  *     CAPPED at MAX_TARGET (100) — it never exceeds the cap. With autoIncrease
  *     OFF, that exercise's target holds.
- *   - lastCompletedDate and lastResolvedDate are both set to today (completing a
- *     day also counts as having reconciled it, so the miss logic won't re-fire
- *     for today).
+ *   - lastCompletedDate, lastActiveDate and lastResolvedDate are all set to
+ *     today. lastActiveDate is what the miss/decay gap is measured from, so
+ *     completing RESETS the miss baseline to today (future misses count from
+ *     here). lastResolvedDate stamps that today is already reconciled.
  *   - A history entry is appended for the consistency tracker: the day, the
  *     per-exercise reps, the total reps, and how long it took (elapsedMs, from
- *     the session timer — v1 just records it, it does not yet affect progression).
+ *     the session timer; v1 just records it, it does not yet affect progression).
  *
  * @param {object} state
  * @param {object} session
@@ -377,7 +419,7 @@ export function completeDay(state, { entries = [], elapsedMs = 0 } = {}, today) 
       bumpedSettings[exerciseId] = {
         ...settings,
         // min(100, ...) is the hard cap: adding the increment can reach 100 but
-        // never go past it.
+        // never goes past it.
         currentTarget: Math.min(MAX_TARGET, settings.currentTarget + increment),
       };
     } else {
@@ -403,26 +445,33 @@ export function completeDay(state, { entries = [], elapsedMs = 0 } = {}, today) 
     streak: state.streak + 1,
     settings: bumpedSettings,
     lastCompletedDate: today,
+    lastActiveDate: today,
     lastResolvedDate: today,
     history: [...state.history, historyEntry],
   };
 }
 
 /**
- * SKIP a day on purpose (the user deliberately held the emergency-exit / "skip
- * today" control — NOT an accidental mid-workout bail-out).
+ * SKIP a day on purpose (the user deliberately held the "skip today" control on
+ * the settings screen, NOT an accidental mid-workout emergency bail-out).
  *
  * A deliberate skip behaves exactly like MISSING ONE day: the target HOLDS and
- * the streak CONTINUES. We stamp lastResolvedDate = today so the automatic
- * 2+-day decay in resolveDay does NOT also fire for this very same gap. We do
- * NOT touch lastCompletedDate and we do NOT append a history entry, because a
- * skip is not a completed workout — the consistency history only logs days the
- * user actually finished.
+ * the streak CONTINUES. The key move is that a skip updates lastActiveDate =
+ * today, so it counts as the user being "active" today and the miss baseline
+ * advances by exactly one day. That is what makes a single skip hold exactly
+ * one day and no more: resolveDay tomorrow measures its gap from today's skip,
+ * so a skip followed by another missed day without working out still rolls into
+ * the 2+-missed-day reset at the right time. We also stamp lastResolvedDate =
+ * today so re-opening the app today stays a no-op.
+ *
+ * We do NOT touch lastCompletedDate and we do NOT append a history entry,
+ * because a skip is not a completed workout: the consistency history only logs
+ * days the user actually finished.
  *
  * @param {object} state
  * @param {string} today  Injected 'YYYY-MM-DD'.
  * @returns {object} new state.
  */
 export function skipDay(state, today) {
-  return { ...state, lastResolvedDate: today };
+  return { ...state, lastActiveDate: today, lastResolvedDate: today };
 }

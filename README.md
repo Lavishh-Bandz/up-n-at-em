@@ -133,10 +133,12 @@ The target is **capped at 100 reps** — progressive overload can climb all the 
 - **"Make it easier (-1)"** — a manual decrease. If the number crept up past what you can manage, drop it by one rep at a time. It will never go below your **starting target** (that's the floor), so the button disables once you're already sitting on it.
 - **Starting target** — the baseline you set, which is *also* the floor the target can never decay below. Raise it and your current target comes up to meet it; lower it and you've given yourself more room to dial back.
 
-**Missing days (the streak & decay rules).** Life happens, so missing a day is handled gently, and it matters *how many* days you miss:
+**Missing days (the streak & decay rules).** Life happens, so missing a day is handled gently, and it matters *how many* days you miss. A "missed day" means a day you did **not** do (or deliberately skip) the workout. That count is measured from the last day you were actually **active** (completed or deliberately skipped a workout), **not** from the last time you merely opened the app, so simply launching the app every day without exercising does not keep your streak alive:
 
-- **Miss exactly one day:** your target **holds** and your streak **continues**. One slipped day costs you nothing.
-- **Miss two or more days:** your streak **resets to 0**, *and* your target **decays by 1 rep (flat) for each missed day** — not scaled to difficulty — floored at your starting target so it never drops below your baseline. So a longer absence eases you back in rather than throwing you straight back at a now-too-high number.
+- **Miss exactly one day:** your target **holds** and your streak **continues**. One slipped day costs you nothing. (Opening the app the day after a workout, or the next day with yesterday skipped, is still within this grace.)
+- **Miss two or more days:** your streak **resets to 0**, *and* your target **decays by 1 rep (flat) for each missed day** (not scaled to difficulty), floored at your starting target so it never drops below your baseline. So a longer absence eases you back in rather than throwing you straight back at a now-too-high number.
+
+Finishing a workout (or taking a deliberate skip) resets the clock the miss count is measured from, so a single skip holds for exactly one day and completing a workout starts a fresh grace window from that day.
 
 **Deliberate "Skip today" (and why it's separate from the emergency exit).** You can choose to take a rest day on purpose. On the settings screen there's a clearly labelled **press-and-HOLD "Skip today"** control: hold it for a couple of seconds and today is marked as a deliberate skip, which behaves exactly like *missing one day* — your target holds and your streak continues.
 

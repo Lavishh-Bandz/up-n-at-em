@@ -80,6 +80,7 @@ describe('createInitialState', () => {
       },
       streak: 0,
       lastCompletedDate: null,
+      lastActiveDate: null,
       lastResolvedDate: null,
       history: [],
     });
@@ -208,14 +209,18 @@ describe('setting mutators', () => {
   });
 });
 
-describe('resolveDay — miss reconciliation', () => {
-  // Build a state that last completed on a known day with a bumped target.
-  function stateLastCompleted(day, { difficulty = 'standard', startingTarget = 10, currentTarget, streak = 5 } = {}) {
+describe('resolveDay: miss reconciliation (gap counted from last ACTIVE day)', () => {
+  // Build a state whose last ACTIVE day (completed or skipped) is a known day,
+  // with a bumped target. The gap the miss/decay maths uses is measured from
+  // this active day, NOT from lastResolvedDate (which is only the idempotency
+  // guard). We seed lastActiveDate here to prove the corrected behaviour.
+  function stateLastActive(day, { difficulty = 'standard', startingTarget = 10, currentTarget, streak = 5 } = {}) {
     const state = createInitialState({ exercise: 'pushup', difficulty, startingTarget });
     return {
       ...state,
       streak,
       lastCompletedDate: day,
+      lastActiveDate: day,
       lastResolvedDate: day,
       settings: {
         pushup: {
@@ -226,39 +231,59 @@ describe('resolveDay — miss reconciliation', () => {
     };
   }
 
-  it('does nothing (holds target, continues streak) when exactly one day is missed', () => {
-    const state = stateLastCompleted('2026-01-01', { currentTarget: 30, streak: 5 });
-    // last seen 2026-01-01, today 2026-01-02 -> missedDays 1.
+  it('holds the target and continues the streak the very NEXT day (gap 1 = zero days missed)', () => {
+    // Completed Mon (2026-01-01), opening Tue (2026-01-02): gap 1 -> 0 missed.
+    const state = stateLastActive('2026-01-01', { currentTarget: 30, streak: 5 });
     const next = resolveDay(state, '2026-01-02');
     expect(next.streak).toBe(5);
     expect(next.settings.pushup.currentTarget).toBe(30);
     expect(next.lastResolvedDate).toBe('2026-01-02');
   });
 
-  it('resets streak and decays target by 2 flat when two days are missed', () => {
-    const state = stateLastCompleted('2026-01-01', { currentTarget: 30, startingTarget: 10, streak: 5 });
-    // last seen 2026-01-01, today 2026-01-03 -> missedDays 2.
+  it('HOLDS target + continues streak when exactly ONE day is missed (gap 2)', () => {
+    // Completed Mon (2026-01-01), opening Wed (2026-01-03): gap 2 -> exactly ONE
+    // day actually missed (Tue). The user rule: miss one day holds + continues.
+    const state = stateLastActive('2026-01-01', { currentTarget: 30, startingTarget: 10, streak: 5 });
     const next = resolveDay(state, '2026-01-03');
+    expect(next.streak).toBe(5); // streak CONTINUES
+    expect(next.settings.pushup.currentTarget).toBe(30); // target HOLDS
+    expect(next.lastResolvedDate).toBe('2026-01-03');
+  });
+
+  it('resets streak and decays target by 2 flat when TWO days are missed (gap 3)', () => {
+    // Completed Mon (2026-01-01), opening Thu (2026-01-04): gap 3 -> TWO days
+    // actually missed (Tue + Wed). Reset streak, decay by 2 flat.
+    const state = stateLastActive('2026-01-01', { currentTarget: 30, startingTarget: 10, streak: 5 });
+    const next = resolveDay(state, '2026-01-04');
     expect(next.streak).toBe(0);
     expect(next.settings.pushup.currentTarget).toBe(28); // 30 - 2 flat
   });
 
+  it('decays by exactly the number of days actually missed, not the calendar gap', () => {
+    // Completed Mon (2026-01-01), opening 2026-01-06: gap 5 -> FOUR days missed.
+    const state = stateLastActive('2026-01-01', { currentTarget: 30, startingTarget: 10, streak: 5 });
+    const next = resolveDay(state, '2026-01-06');
+    expect(next.streak).toBe(0);
+    expect(next.settings.pushup.currentTarget).toBe(26); // 30 - 4 flat
+  });
+
   it('floors the decay at startingTarget on a large gap (never below)', () => {
-    const state = stateLastCompleted('2026-01-01', { currentTarget: 15, startingTarget: 10, streak: 9 });
-    // A 60-day gap would drive 15 - 60 negative; it must floor at 10.
+    const state = stateLastActive('2026-01-01', { currentTarget: 15, startingTarget: 10, streak: 9 });
+    // A 60-day gap drives 15 - 59 negative; it must floor at 10.
     const next = resolveDay(state, '2026-03-02');
     expect(next.streak).toBe(0);
     expect(next.settings.pushup.currentTarget).toBe(10);
   });
 
-  it('is idempotent: calling twice with the same today applies the decay once', () => {
-    const state = stateLastCompleted('2026-01-01', { currentTarget: 30, startingTarget: 10, streak: 5 });
-    const once = resolveDay(state, '2026-01-05'); // missedDays 4 -> 30 - 4 = 26
-    expect(once.settings.pushup.currentTarget).toBe(26);
+  it('is idempotent: re-running for the same today changes nothing', () => {
+    const state = stateLastActive('2026-01-01', { currentTarget: 30, startingTarget: 10, streak: 5 });
+    const once = resolveDay(state, '2026-01-05'); // gap 4 -> 3 missed -> 30 - 3 = 27
+    expect(once.settings.pushup.currentTarget).toBe(27);
     expect(once.streak).toBe(0);
-    const twice = resolveDay(once, '2026-01-05'); // same day -> missedDays 0 -> no change
-    expect(twice.settings.pushup.currentTarget).toBe(26);
+    const twice = resolveDay(once, '2026-01-05'); // lastResolvedDate === today -> no-op
+    expect(twice.settings.pushup.currentTarget).toBe(27);
     expect(twice.streak).toBe(0);
+    expect(twice).toBe(once); // literally the same object back (pure no-op)
   });
 
   it('just stamps today for a brand-new user with nothing to reconcile', () => {
@@ -268,6 +293,95 @@ describe('resolveDay — miss reconciliation', () => {
     expect(next.streak).toBe(0);
     expect(next.settings.pushup.currentTarget).toBe(10);
   });
+});
+
+describe('resolveDay: keyed to WORKOUTS DONE, not app opens', () => {
+  // This is the cadence fix: opening the app on consecutive days WITHOUT
+  // completing a workout must NOT prevent the 2+-missed-day reset+decay. The
+  // gap is measured from lastActiveDate (last completed-or-skipped day), and
+  // resolveDay never advances that baseline, so daily opens cannot keep a
+  // streak alive forever.
+
+  it('opening the app several days running WITHOUT working out eventually resets + decays', () => {
+    // Completed Mon (2026-01-01) with a grown target and a streak.
+    let state = stateForCadence('2026-01-01', { currentTarget: 30, startingTarget: 10, streak: 5 });
+
+    // Tue open, no workout: gap 1 from active Mon -> 0 missed -> HOLD. The app
+    // stamps lastResolvedDate = Tue but does NOT touch lastActiveDate.
+    state = resolveDay(state, '2026-01-02');
+    expect(state.streak).toBe(5);
+    expect(state.settings.pushup.currentTarget).toBe(30);
+    expect(state.lastActiveDate).toBe('2026-01-01'); // baseline unmoved by the open
+
+    // Wed open, still no workout: gap 2 from active Mon -> 1 missed -> still HOLD.
+    state = resolveDay(state, '2026-01-03');
+    expect(state.streak).toBe(5);
+    expect(state.settings.pushup.currentTarget).toBe(30);
+    expect(state.lastActiveDate).toBe('2026-01-01');
+
+    // Thu open, still no workout: gap 3 from active Mon -> 2 missed -> RESET +
+    // decay by 2. The daily opens did NOT save the streak.
+    state = resolveDay(state, '2026-01-04');
+    expect(state.streak).toBe(0);
+    expect(state.settings.pushup.currentTarget).toBe(28); // 30 - 2 flat
+  });
+
+  it('completing a workout RESETS the miss baseline to today', () => {
+    // Missed enough to reset once, then complete: completing moves lastActiveDate
+    // to the completion day, so the next day starts a fresh grace window.
+    let state = stateForCadence('2026-01-01', { currentTarget: 30, startingTarget: 10, streak: 5 });
+    state = resolveDay(state, '2026-01-04'); // 2 missed -> reset, target 28
+    expect(state.streak).toBe(0);
+
+    // Complete on the 4th.
+    state = completeDay(state, { entries: [{ exercise: 'pushup', reps: 28 }] }, '2026-01-04');
+    expect(state.lastActiveDate).toBe('2026-01-04');
+    expect(state.streak).toBe(1);
+    const targetAfterComplete = state.settings.pushup.currentTarget; // 28 + 2 = 30
+
+    // Open the 5th (gap 1 from the new active day) -> HOLD, streak continues.
+    state = resolveDay(state, '2026-01-05');
+    expect(state.streak).toBe(1);
+    expect(state.settings.pushup.currentTarget).toBe(targetAfterComplete);
+  });
+
+  it('a deliberate skip holds exactly ONE day, then the miss clock resumes', () => {
+    // Completed Mon, skip Tue deliberately: the skip advances the active day to
+    // Tue, so Wed is only one day past the skip (HOLD), but Thu is two days past
+    // (RESET) if still no workout.
+    let state = stateForCadence('2026-01-01', { currentTarget: 30, startingTarget: 10, streak: 5 });
+
+    state = skipDay(state, '2026-01-02'); // deliberate rest Tue
+    expect(state.streak).toBe(5); // held
+    expect(state.settings.pushup.currentTarget).toBe(30); // held
+    expect(state.lastActiveDate).toBe('2026-01-02'); // skip counts as active
+    expect(state.lastCompletedDate).toBe('2026-01-01'); // but not a completion
+
+    // Wed open, no workout: gap 1 from the skip -> 0 missed -> still HOLD.
+    state = resolveDay(state, '2026-01-03');
+    expect(state.streak).toBe(5);
+    expect(state.settings.pushup.currentTarget).toBe(30);
+
+    // Fri open, no workout: gap 3 from the skip -> 2 missed -> RESET + decay 2.
+    state = resolveDay(state, '2026-01-05');
+    expect(state.streak).toBe(0);
+    expect(state.settings.pushup.currentTarget).toBe(28);
+  });
+
+  // Same seed helper as above, named for this block's intent.
+  function stateForCadence(day, opts) {
+    const state = createInitialState({ exercise: 'pushup', difficulty: 'standard', startingTarget: opts.startingTarget });
+    return {
+      ...state,
+      streak: opts.streak,
+      lastCompletedDate: day,
+      lastActiveDate: day,
+      lastResolvedDate: day,
+      settings: {
+        pushup: { ...state.settings.pushup, currentTarget: opts.currentTarget },
+      },
+    };
+  }
 });
 
 describe('skipDay — deliberate skip behaves like miss-one-day', () => {
