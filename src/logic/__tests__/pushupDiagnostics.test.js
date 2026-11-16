@@ -1,5 +1,9 @@
 // pushupDiagnostics.test.js
 // Pure unit tests for the "click Begin -> leave a report" diagnostics recorder.
+// Push-ups are counted from the 3D ELBOW JOINT ANGLE (degrees), so the recorder
+// tracks the smoothed elbow angle each frame against the down/up angle
+// thresholds: bend PAST downAngle (angle <= downAngle) to reach the bottom,
+// straighten PAST upAngle (angle >= upAngle) to complete the rep.
 import { describe, it, expect } from 'vitest';
 import { createPushupDiagnostics } from '../pushupDiagnostics.js';
 
@@ -7,7 +11,7 @@ describe('createPushupDiagnostics', () => {
   it('is inactive until start() and ignores samples before start', () => {
     const diag = createPushupDiagnostics();
     expect(diag.active).toBe(false);
-    diag.sample({ excursion: 0.5, downFraction: 0.16 }, 100);
+    diag.sample({ angle: 120, downAngle: 100 }, 100);
     expect(diag.report.samples).toHaveLength(0);
     expect(diag.report.summary.sampleCount).toBe(0);
   });
@@ -19,8 +23,8 @@ describe('createPushupDiagnostics', () => {
         exercise: 'pushup',
         difficulty: 'standard',
         targetReps: 20,
-        downFraction: 0.16,
-        upFraction: 0.06,
+        downAngle: 100,
+        upAngle: 155,
         side: 'left',
       },
       1000
@@ -29,12 +33,10 @@ describe('createPushupDiagnostics', () => {
 
     diag.sample(
       {
-        excursion: 0.1,
-        downFraction: 0.16,
-        upFraction: 0.06,
-        bodyScalePx: 142.6,
-        bodyScaleLocked: true,
-        upperBodyY: 233.4,
+        angle: 152.4,
+        rawAngle: 150.1,
+        downAngle: 100,
+        upAngle: 155,
         confident: true,
         armed: true,
         phase: 'up',
@@ -46,57 +48,58 @@ describe('createPushupDiagnostics', () => {
 
     const { report } = diag;
     expect(report.meta.exercise).toBe('pushup');
-    expect(report.meta.downFraction).toBe(0.16);
+    expect(report.meta.downAngle).toBe(100);
+    expect(report.meta.upAngle).toBe(155);
     expect(report.samples).toHaveLength(1);
     const s = report.samples[0];
     // Timestamps are stored relative to start and rounded.
     expect(s.tMs).toBe(50);
-    expect(s.bodyScalePx).toBe(143); // rounded to whole px
-    expect(s.upperBodyY).toBe(233);
-    expect(s.bodyScaleLocked).toBe(true);
+    expect(s.angle).toBe(152.4); // rounded to one decimal
+    expect(s.rawAngle).toBe(150.1);
     expect(s.phase).toBe('up');
+    expect(s.postureOk).toBe(true);
   });
 
-  it('tracks min/max/last excursion and whether downFraction was reached', () => {
+  it('tracks min/max/last angle and whether the down threshold was reached', () => {
     const diag = createPushupDiagnostics();
-    diag.start({ downFraction: 0.16, upFraction: 0.06 }, 0);
-    diag.sample({ excursion: 0.02, downFraction: 0.16 }, 10);
-    diag.sample({ excursion: 0.2, downFraction: 0.16 }, 20); // reaches down
-    diag.sample({ excursion: 0.05, downFraction: 0.16 }, 30);
+    diag.start({ downAngle: 100, upAngle: 155 }, 0);
+    diag.sample({ angle: 160, downAngle: 100 }, 10); // up (straight)
+    diag.sample({ angle: 92, downAngle: 100 }, 20); // bent past down
+    diag.sample({ angle: 150, downAngle: 100 }, 30); // back up
 
     const { summary } = diag.report;
     expect(summary.sampleCount).toBe(3);
-    expect(summary.minExcursion).toBe(0.02);
-    expect(summary.maxExcursion).toBe(0.2);
-    expect(summary.lastExcursion).toBe(0.05);
-    expect(summary.downFractionReached).toBe(true);
+    expect(summary.minAngle).toBe(92);
+    expect(summary.maxAngle).toBe(160);
+    expect(summary.lastAngle).toBe(150);
+    expect(summary.downAngleReached).toBe(true);
   });
 
-  it('reports downFractionReached=false when the dip never gets deep enough', () => {
+  it('reports downAngleReached=false when the elbow never bends deep enough', () => {
     const diag = createPushupDiagnostics();
-    diag.start({ downFraction: 0.16 }, 0);
-    diag.sample({ excursion: 0.05, downFraction: 0.16 }, 10);
-    diag.sample({ excursion: 0.1, downFraction: 0.16 }, 20);
-    expect(diag.report.summary.downFractionReached).toBe(false);
+    diag.start({ downAngle: 100 }, 0);
+    diag.sample({ angle: 150, downAngle: 100 }, 10);
+    diag.sample({ angle: 120, downAngle: 100 }, 20); // bent, but not past 100
+    expect(diag.report.summary.downAngleReached).toBe(false);
   });
 
   it('tracks the most-recent rep count in the summary', () => {
     const diag = createPushupDiagnostics();
-    diag.start({ downFraction: 0.16 }, 0);
-    diag.sample({ excursion: 0.2, downFraction: 0.16, reps: 0 }, 10);
-    diag.sample({ excursion: 0.02, downFraction: 0.16, reps: 1 }, 20);
+    diag.start({ downAngle: 100 }, 0);
+    diag.sample({ angle: 92, downAngle: 100, reps: 0 }, 10);
+    diag.sample({ angle: 158, downAngle: 100, reps: 1 }, 20);
     expect(diag.report.summary.repsCounted).toBe(1);
   });
 
   it('stops recording after finish() but keeps the data readable', () => {
     const diag = createPushupDiagnostics();
-    diag.start({ downFraction: 0.16 }, 1000);
-    diag.sample({ excursion: 0.2, downFraction: 0.16, reps: 1 }, 1100);
+    diag.start({ downAngle: 100 }, 1000);
+    diag.sample({ angle: 92, downAngle: 100, reps: 1 }, 1100);
     diag.finish('completed', 1500);
 
     expect(diag.active).toBe(false);
     // Samples after finish are ignored.
-    diag.sample({ excursion: 0.9, downFraction: 0.16 }, 1600);
+    diag.sample({ angle: 80, downAngle: 100 }, 1600);
     const { report } = diag;
     expect(report.finishReason).toBe('completed');
     expect(report.durationMs).toBe(500);
@@ -106,23 +109,23 @@ describe('createPushupDiagnostics', () => {
 
   it('caps stored samples but keeps summary stats correct for all of them', () => {
     const diag = createPushupDiagnostics();
-    diag.start({ downFraction: 0.16 }, 0);
-    // Feed more than the internal cap (400).
+    diag.start({ downAngle: 100 }, 0);
+    // Feed more than the internal cap (400). Angles climb from 100 upward.
     for (let i = 0; i < 450; i++) {
-      diag.sample({ excursion: 0.01 + i * 0.001, downFraction: 0.16 }, i);
+      diag.sample({ angle: 100 + i * 0.1, downAngle: 100 }, i);
     }
     const { report } = diag;
     // Stored samples are capped...
     expect(report.samples.length).toBeLessThanOrEqual(400);
     // ...but the summary still saw every one.
     expect(report.summary.sampleCount).toBe(450);
-    expect(report.summary.maxExcursion).toBeCloseTo(0.01 + 449 * 0.001, 3);
+    expect(report.summary.maxAngle).toBeCloseTo(100 + 449 * 0.1, 1);
   });
 
   it('reset() clears everything', () => {
     const diag = createPushupDiagnostics();
-    diag.start({ downFraction: 0.16 }, 0);
-    diag.sample({ excursion: 0.2, downFraction: 0.16 }, 10);
+    diag.start({ downAngle: 100 }, 0);
+    diag.sample({ angle: 92, downAngle: 100 }, 10);
     diag.reset();
     expect(diag.active).toBe(false);
     expect(diag.report.meta).toBe(null);

@@ -25,7 +25,6 @@ import { createWorkoutQueue } from '../logic/workoutQueue.js';
 import { createRepCounter } from '../logic/repCounter.js';
 import { getPreset, pickBetterSide, evaluateOrientation } from '../logic/exercises.js';
 import {
-  angleBetween,
   angleBetween3D,
   allConfident,
   createAngleSmoother,
@@ -315,12 +314,12 @@ export default function WorkoutSession({
           exercise: step.exercise,
           difficulty: step.difficulty,
           targetReps: step.targetReps,
-          // The push-up thresholds are now ELBOW ANGLES (degrees), not pixel
-          // fractions. FEAT-003 reworks the readout/report fields fully; here we
-          // record the angle thresholds under the fields the report already
-          // understands so the build stays consistent.
-          downFraction: preset.downAngle,
-          upFraction: preset.upAngle,
+          // The push-up signal is now the 3D ELBOW ANGLE (degrees), so the set
+          // context records the down/up ANGLE thresholds the detector is aiming
+          // for (bend PAST downAngle to reach the bottom, straighten PAST
+          // upAngle to complete the rep).
+          downAngle: preset.downAngle,
+          upAngle: preset.upAngle,
           side,
         },
         nowMs
@@ -387,68 +386,49 @@ export default function WorkoutSession({
       counter.update(smoothedAngle, isConfident);
 
       // --- DEBUG READOUT + DIAGNOSTICS REPORT (throttled) ---
-      // FEAT-003 reworks this readout fully for the elbow angle. For now we keep
-      // the app compiling and surface the live angle + its thresholds using the
-      // fields the readout/diagnostics already understand (the old pixel-dip
-      // fields are fed safe placeholders so nothing reads a removed variable).
+      // Surface the SAME numbers the elbow-angle counter used this frame so the
+      // user can tune from real data: the live (smoothed) elbow angle in
+      // degrees, the raw angle before smoothing, the down/up ANGLE thresholds it
+      // is working between, plus confidence / armed / phase / posture / reps.
+      // These are the real values the detector decided on, just throttled so the
+      // panel never re-renders at frame rate.
       const preset = getPreset(step.exercise, step.difficulty);
-      const readout = {
-        // Show the live (smoothed) elbow angle where the dip used to be, and the
-        // down/up ANGLE thresholds it is working between.
-        excursion: smoothedAngle,
-        rawExcursion: angle,
-        downFraction: preset.downAngle,
-        upFraction: preset.upAngle,
-        // Pixel-ruler fields no longer exist for push-ups: safe placeholders.
-        bodyScalePx: null,
-        bodyScaleLocked: false,
-        upperBodyY: null,
+      const snapshot = {
+        angle: smoothedAngle, // smoothed elbow angle the counter actually saw
+        rawAngle: angle, // pre-smoothing elbow angle (for comparison)
+        downAngle: preset.downAngle, // bend PAST this (angle <= downAngle) = down
+        upAngle: preset.upAngle, // straighten PAST this (angle >= upAngle) = up
         confident: isConfident,
         armed: isArmed,
         phase: counter.phase,
         postureOk: orientationOk,
         reps: counter.reps,
-        // Depth-breakdown fields are not meaningful for an angle: placeholders.
-        usedDepth: false,
-        depthScaleM: null,
-        depthScaleLocked: false,
-        yDip: null,
-        zDip: null,
       };
-      if (maybeUpdateDebug(nowMs, readout, diagnosticsRef.current.report)) {
-        // Record a report sample on the same throttled beat.
-        diagnosticsRef.current.sample(
-          {
-            excursion: smoothedAngle,
-            downFraction: preset.downAngle,
-            upFraction: preset.upAngle,
-            bodyScalePx: null,
-            bodyScaleLocked: false,
-            upperBodyY: null,
-            confident: isConfident,
-            armed: isArmed,
-            phase: counter.phase,
-            postureOk: orientationOk,
-            reps: counter.reps,
-            usedDepth: false,
-            depthScaleM: null,
-            depthScaleLocked: false,
-            yDip: null,
-            zDip: null,
-          },
-          nowMs
-        );
+      if (maybeUpdateDebug(nowMs, snapshot, diagnosticsRef.current.report)) {
+        // Record a report sample on the same throttled beat (same numbers).
+        diagnosticsRef.current.sample(snapshot, nowMs);
       }
     } else {
-      // --- SIT-UP: hip/torso angle (unchanged path) ---
-      let angle = null;
-      const [aName, vName, cName] = angleJoints;
+      // --- SIT-UP: 3D HIP/TORSO ANGLE (shoulder -> hip -> knee) ---
+      // Sit-ups now measure the torso fold in the SAME 3D world-landmark space
+      // (x3d/y3d/z3d, meters) the push-ups use, via angleBetween3D, instead of
+      // the 2D pixel angle. WHY: in this runtime the 2D pixels come back null
+      // and are only rebuilt (projected) from the 3D, so a pixel angle was
+      // measured on unreliable, frame-centered positions. The 3D hip angle is
+      // scale- and viewpoint-invariant, so it reads the fold honestly:
+      //   lying flat  = torso open  = large angle
+      //   sitting up  = torso folded = small angle
+      // The existing degree thresholds (downAngle/upAngle in exercises.js) still
+      // make sense: an actual joint angle in degrees is the same quantity
+      // whether it is computed from meters or pixels, so no threshold change is
+      // needed — only the coordinate space the angle is read from changed.
+      const [aName, vName, cName] = angleJoints; // [shoulder, hip, knee]
       const a = keypoints[aName];
-      const v = keypoints[vName];
+      const v = keypoints[vName]; // hip = the vertex we measure
       const c = keypoints[cName];
-      if (a && v && c) {
-        angle = angleBetween(a, v, c);
-      }
+      // angleBetween3D returns null (never NaN) for missing/degenerate 3D input,
+      // so a frame without usable 3D joints is simply skipped below.
+      const angle = angleBetween3D(a, v, c);
       if (angle == null) {
         updateDisplayConfident(statusDebouncerRef.current.update(false, nowMs));
         return;
